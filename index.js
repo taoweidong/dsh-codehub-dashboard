@@ -30,7 +30,7 @@ import { createWorkflows } from './workflows.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const webRoot = join(here, 'web')
-const PLUGIN_VERSION = '0.1.5'
+const PLUGIN_VERSION = '0.1.6'
 
 const MAX_EXEC_BUFFER = 16 * 1024 * 1024
 const EXEC_TIMEOUT_MS = 30_000

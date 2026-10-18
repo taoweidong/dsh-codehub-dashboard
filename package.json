@@ -1,6 +1,6 @@
 {
   "name": "dsh-codehub-dashboard",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "DSH native CodeHub workspace: GitHub organization, PR and Issue dashboard with native AI review drafts and Issue development sessions.",
   "license": "MIT",
   "type": "module",

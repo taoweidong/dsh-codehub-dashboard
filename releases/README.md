@@ -23,7 +23,8 @@
 | dsh-codehub-dashboard-0.1.3.tgz | 68,883 B | 2026-10-17 21:54 | 首个 npm 发布版：含 `a0b5da7` 的 `resolutionAvailable` 三态修复（未加载评论不再冒充确信的 0）；9 文件 / 218.8 kB unpacked；测试 117+91；2026-10-17 已发布到 npm（`latest`，发布件 68,719 B / LF） |
 | dsh-codehub-dashboard-0.1.4.tgz | 69,829 B | 2026-10-17 22:32 | 文档重构版：README 按标准开源项目重组、新增 `docs/npm-package.md`、回填 0.1.3 npm 发布事实；代码与测试同 0.1.3（117+91）；9 文件 / 221.7 kB unpacked；2026-10-17 已发布到 npm（`latest`，发布件 69,663 B / LF） |
 | dsh-codehub-dashboard-0.1.5.tgz | 65,153 B | 2026-10-17 22:42 | README 精简版：README 只保留定位 / 特性 / 快速开始 / 文档索引，详细内容移入新增的 `docs/usage-and-dependencies.md`；host 断言增至 92；9 文件 / 212.0 kB unpacked |
+| dsh-codehub-dashboard-0.1.6.tgz | 74,242 B | 2026-10-18 11:41 | MR AI 检视 → 问题清单 → 提 Issue（Phase 0–3）：结构化输出解析与降级、服务端 `fileIssues` 逐条状态机、`review.latest` 恢复、GitHub 4xx 状态保留、评审区问题清单与批量创建、Issue 行快速开始开发；9 文件 / 243.0 kB unpacked；测试 149+92 |
 
-> 归档包按**当时**的仓库布局打包，只作历史交付凭证。0.1.0 包内 `README.md` 与当前源码不一致，不要直接复用；**0.1.5 为当前最新交付版本**（0.1.4 为上一版，`0.1.2` 未发布到 npm）。
+> 归档包按**当时**的仓库布局打包，只作历史交付凭证。0.1.0 包内 `README.md` 与当前源码不一致，不要直接复用；**0.1.6 为当前最新交付版本**（0.1.5 为上一版，`0.1.2` 未发布到 npm）。未发布到 npm。
 
 > 交付与离线安装操作详见 [docs/packaging-and-offline-install.md](../docs/packaging-and-offline-install.md)。
