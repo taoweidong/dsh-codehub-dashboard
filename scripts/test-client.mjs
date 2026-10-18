@@ -173,7 +173,8 @@ test('MR detail uses the single mr.diff response when it carries the MR', async 
   const s = spa(), ops = [];
   s.sandbox.answer = async op => { ops.push(op); return { diff: 'one request diff', files: ['a.js'], diffTruncated: false, mr: { number: 9, title: 'Single fetch', state: 'open', reviews: [], comments: [] }, repo: {} }; };
   await s.run(`api=answer;openMr('repo',9)`);
-  assert.deepEqual(ops, ['mr.diff']);
+  // review.latest restores any prior AI review draft for this MR (drafts used to live only in memory)
+  assert.deepEqual(ops, ['mr.diff', 'review.latest']);
   assert.match(s.node('#drawerBody').innerHTML, /one request diff/);
   assert.match(s.node('#drawerBody').innerHTML, /a\.js/);
 });
@@ -182,7 +183,7 @@ test('MR detail falls back to the mr op when mr.diff has no MR payload', async (
   const s = spa(), ops = [];
   s.sandbox.answer = async (op) => { ops.push(op); return op === 'mr.diff' ? { error: 'diff denied' } : { mr: { number: 10, title: 'Fallback', state: 'open', reviews: [], comments: [] }, repo: {}, detailErrors: ['comments denied'] }; };
   await s.run(`api=answer;openMr('repo',10)`);
-  assert.deepEqual(ops, ['mr.diff', 'mr']);
+  assert.deepEqual(ops, ['mr.diff', 'mr', 'review.latest']);
   assert.match(s.node('#drawerTitle').textContent, /Fallback/);
   assert.match(s.node('#drawerBody').innerHTML, /Diff 加载失败：diff denied/);
 });
@@ -247,6 +248,47 @@ test('review create and publish require separate consent and post only the edite
   assert.deepEqual(posts[1], {op:'review.publish',body:{id:'draft-4',body:'only edited text',confirmed:true}});
   await s.run('publishReview()');
   assert.equal(posts.length,2);
+});
+
+test('findings restore from review.latest, preselect severe ones, and file each Issue once', async () => {
+  const s = spa(), posts = [];
+  const draft = {
+    id: 'draft-f', number: 6, repoKey: 'repo', headSha: 'def', status: 'draft',
+    structured: true, findingsTruncated: false, parseWarnings: [],
+    findings: [
+      { id: 'f1', severity: 'blocker', category: 'bug', title: '空指针', file: 'src/a.js', line: 1, evidence: 'x', detail: 'd', suggestion: 's', confidence: 'high', fileVerified: true, evidenceVerified: true, issueStatus: 'idle', issue: null, issueError: null },
+      { id: 'f2', severity: 'nit', category: 'other', title: '命名', file: null, line: null, evidence: '', detail: 'd2', suggestion: 's2', confidence: 'low', fileVerified: null, evidenceVerified: null, issueStatus: 'idle', issue: null, issueError: null },
+    ],
+  };
+  const filed = JSON.parse(JSON.stringify(draft));
+  filed.findings[0].issueStatus = 'created';
+  filed.findings[0].issue = { number: 501, url: 'https://github.com/o/r/issues/501', createdAt: 'now' };
+  s.sandbox.answer = async op => op === 'review.latest'
+    ? { ok: true, draft }
+    : { diff: 'diff', files: [], mr: { number: 6, title: 'Findings target', state: 'open', reviews: [], comments: [] }, repo: {} };
+  s.sandbox.post = async (op, body) => {
+    posts.push({ op, body: JSON.parse(JSON.stringify(body)) });
+    return { ok: true, draft: filed, stopped: null, results: [{ findingId: 'f1', status: 'created', issue: filed.findings[0].issue }] };
+  };
+  await s.run(`api=answer;apiPost=post;openMr('repo',6)`);
+  // The draft came back from the audit file, so reopening the MR no longer loses findings.
+  // Recovery runs when the workspace renders; await it here for a deterministic assertion.
+  await s.run('ensureReviewState(detail)');
+  const wsHtml = () => s.run('document.getElementById("reviewWorkspace").innerHTML');
+  const html = wsHtml();
+  assert.match(html, /AI 问题清单（2 条）/);
+  assert.match(html, /空指针/);
+  assert.match(html, /src\/a\.js:1/);
+  // blocker/major are preselected; nit is not
+  assert.equal(s.run(`[...reviewWork.get('repo|6').selected].join(",")`), 'f1');
+  s.sandbox.confirm = () => true;
+  await s.run('fileSelectedIssues()');
+  assert.equal(posts.length, 1);
+  assert.deepEqual(posts[0], { op: 'review.issues.create', body: { id: 'draft-f', findingIds: ['f1'], confirmed: true } });
+  assert.match(wsHtml(), /已创建 Issue/);
+  // A created finding is locked and must never be posted again.
+  await s.run('fileSelectedIssues()');
+  assert.equal(posts.length, 1, 'must not re-post a finding that already has an Issue');
 });
 
 test('review create locks duplicate clicks and preserves draft and edits on publish error', async () => {

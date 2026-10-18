@@ -733,12 +733,18 @@ const writes = ['config.set', 'config.test', 'review.create', 'review.publish',
 5. ⏭️ `index.js`：`boot.capabilities.issueWrite` 推迟到 Phase 2 与 `review.issues.create` 一同落地（该能力依赖 `createIssue` 注入，Phase 1 尚无写 Issue 路径）。
 6. ✅ 测试：合法 JSON、带围栏、前后解释（brace 兜底）、非法 JSON 降级并 32KB 截断、字段截断、去重、排序、12 条截断、文件/证据三态核验、旧草稿兼容——node:test 新增 16 例，全量 139/139 通过。
 
-### Phase 2：提 Issue（M，约 1 天）
+### Phase 2：提 Issue（M，约 1 天）—— 已完成（commit 待推送）
 
-1. `workflows.js`：新增 `fileIssues`，接入 `createIssue` 依赖与逐条状态机。
-2. `index.js`：实现 `createIssue`（resolveRepo + rev 校验 + `githubRequest` POST + 4xx 状态保留），注册 `review.issues.create`，加入 writes 白名单。
-3. UI（简化版，工作量较初版显著下降）：MR 行内渲染问题清单（标题/状态/链接，**不内联 diff**）、默认勾选、全选/清空、批量创建、逐条状态、恢复 `review.latest`、`generating` 轮询；**另在 Issue 列表行暴露「快速开始开发」按钮，薄封装已有 `issue.develop`，后端零新增**。删除初版规划的 inline diff 渲染与 PR 元数据布局。
-4. 测试：确认门、幂等、created 跳过、unknown 409、failed 重试、超过 10 条 400、部分失败 results、发布后仍可提 Issue、host 路由方法/Origin/415。
+1. ✅ `workflows.js`：新增 `fileIssues`，接入 `createIssue` 依赖与逐条状态机（`idle → creating → created | failed | unknown`）。
+   - 前置：确认门（严格键集）→ 严格 `findingIds` 校验（非空/去重/1–10/正则）→ `filing` 草稿级锁 → 草稿需 `structured===true` 且有清单 → `creating`/`unknown` 条目拒绝重试（409 + `needsVerification`）。
+   - 逐条：`created` 幂等跳过（不重复 POST）→ 顺序写入 → `knownNotCreated` 决定 `failed`/`unknown` → **fail-fast**（剩余保持 `idle`）→ 90s 批次预算与配置变更检测（`stopped: null|timeout|config|error`）。
+   - `capabilities` 增加 `issueWrite`。
+   - 新增 `composeIssueTitle`/`composeIssueBody`：MR 溯源、四空格缩进证据块、`@` 提及零宽空格中和、审计标记 `<!-- codehub-ai-review:{draftId}:{findingId} -->`（净化后追加）。
+2. ✅ `index.js`：`githubRequest` 增加 `preserveStatus`（gh 侧从 stderr 解析 `HTTP 4xx`，http 侧原样保留；默认路径行为不变，评审发布不受影响）；实现 `createIssue`（rev 校验 + 固定端点 + 4xx 标记 `knownNotCreated`）；注册 `review.issues.create` 路由并加入 writes 白名单。
+3. ✅ UI（简化版）：MR 的评审工作区渲染问题清单（严重度/位置/核对结果/详情折叠）、按严重度（blocker/major）默认预选、全选/清空、单次最多 10 条、批量创建与逐条状态/外链、`review.latest` 恢复（含 `generating` 轮询）；**Issue 列表行暴露「快速开始开发」按钮，复用已有 `issue.develop`，后端零新增**。diff 不内联，详情跳 GitHub。
+4. ✅ 测试：确认门、参数校验、幂等跳过、4xx→failed、5xx→unknown、fail-fast、并发 409、崩溃遗留 `creating`/`unknown` 拒绝重试、端到端 HTTP（创建/幂等/403→failed/500→unknown）、host 路由 GET 405/跨站 403/content-type 415。node:test 149/149、test-host 92/92、lint 0 错误。
+
+> 实现说明：草稿恢复（§2.2 的内存 Map 丢失问题）在渲染评审工作区时触发，走同一个 `review.latest` 请求；UI 断言需显式 `await ensureReviewState(detail)` 才是确定性的。
 
 ### Phase 3：收尾（S，约 0.5 天）
 
