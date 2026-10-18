@@ -713,13 +713,15 @@ const writes = ['config.set', 'config.test', 'review.create', 'review.publish',
 
 ## 12. 实施计划
 
-建议按 4 个可独立验收的小步提交，避免一次性大改：
+建议按 4 个可独立验收的小步提交，避免一次性大改。
+
+注：UI 已按 `ai-review-ui-simplified.md` 简化为「列表 + 执行」面板——MR 行不内联 diff（diff 仍由服务端取给模型），Issue 行复用已有 `issue.develop` 提供「快速开始开发」。后端设计与 §13-§15 的正确性约束不受影响；Phase 2 前端工作量因此约减半。
 
 ### Phase 0：前置修复（S，约 0.5 天）
 
 1. `web/index.html`：`apiPost(op, body, { timeoutMs })` 支持覆盖超时；`review.create` 与 `review.issues.create` 使用 150s，其余保持 20s。
 2. `workflows.js`：新增 `generating` 进程内锁，重复 `review.create` 返回 409。
-3. 新增 `review.latest` op（先只返回草稿，不做 UI 也行）。
+3. 新增 `review.latest` op，按最终契约实现：按 `(repoKey, number)` 扫描审计文件取最新草稿（含 `generating` 状态），不临时降级为「只返回草稿」。
 4. 测试：并发 409、latest 空/有记录、客户端超时参数（client 测试）。
 
 ### Phase 1：结构化输出（M，约 1 天）
@@ -735,12 +737,12 @@ const writes = ['config.set', 'config.test', 'review.create', 'review.publish',
 
 1. `workflows.js`：新增 `fileIssues`，接入 `createIssue` 依赖与逐条状态机。
 2. `index.js`：实现 `createIssue`（resolveRepo + rev 校验 + `githubRequest` POST + 4xx 状态保留），注册 `review.issues.create`，加入 writes 白名单。
-3. UI：问题清单渲染、默认勾选、全选/清空、批量创建、逐条状态、恢复 `review.latest`、`generating` 轮询。
+3. UI（简化版，工作量较初版显著下降）：MR 行内渲染问题清单（标题/状态/链接，**不内联 diff**）、默认勾选、全选/清空、批量创建、逐条状态、恢复 `review.latest`、`generating` 轮询；**另在 Issue 列表行暴露「快速开始开发」按钮，薄封装已有 `issue.develop`，后端零新增**。删除初版规划的 inline diff 渲染与 PR 元数据布局。
 4. 测试：确认门、幂等、created 跳过、unknown 409、failed 重试、超过 10 条 400、部分失败 results、发布后仍可提 Issue、host 路由方法/Origin/415。
 
 ### Phase 3：收尾（S，约 0.5 天）
 
-1. 文档更新（design/api-reference/README）。
+1. 文档更新：`api-reference.md`/`README.md` 同步到简化 UI——功能描述改为「列表 + AI 检视 + 批量建 Issue + 快速开发」；`design.md` 的 5.1-5.6 已按简化版改写（本次）。
 2. `npm run lint` + `npm test` 全绿。
 3. 真实宿主验证：启动日志无 `did not activate` / `waiting for services`；用一个测试仓库实际创建 1 个 Issue（用户明确同意）并确认链接。
 4. 打包归档到 `releases/`（不入 git）。
