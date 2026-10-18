@@ -8,7 +8,13 @@ const MAX_STATE_BYTES = 48 * 1024 * 1024
 const MAX_DIFF_BYTES = 64 * 1024
 const MAX_BODY_BYTES = 32 * 1024
 const MAX_STREAM_BYTES = 512 * 1024
-const MAX_TOKENS = 6144
+// Output budget for one review request. Some providers pin extended thinking on
+// (they reject `enable_thinking: false` with INVALID_REQUEST), and reasoning is
+// billed against the same `maxTokens` ceiling, so the budget must cover
+// reasoning + the whole JSON contract or the review dies as `max-tokens`.
+const DEFAULT_MAX_TOKENS = 16384
+const MIN_MAX_TOKENS = 1024
+const MAX_MAX_TOKENS = 32768
 const MAX_MODEL_OUTPUT_BYTES = 96 * 1024
 const MAX_FINDINGS = 12
 const MAX_FINDING_TITLE = 200
@@ -99,6 +105,17 @@ function bounded(value, maxBytes, coverage) {
   let end = maxBytes
   while ((bytes[end] & 0xc0) === 0x80) end--
   return bytes.subarray(0, end).toString('utf8')
+}
+
+// Resolve the review output budget from configuration. Unknown/blank values fall
+// back to the default; explicit values are clamped so one review can never ask a
+// provider for an unbounded completion.
+export function tokenBudget(selection) {
+  const raw = selection?.maxTokens
+  if (raw === undefined || raw === null || (typeof raw === 'string' && !raw.trim())) return DEFAULT_MAX_TOKENS
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value) || value <= 0) return DEFAULT_MAX_TOKENS
+  return Math.max(MIN_MAX_TOKENS, Math.min(MAX_MAX_TOKENS, value))
 }
 
 function assertBinding(data, kind, repoKey, number) {
@@ -533,7 +550,14 @@ async function reviewText(llm, options) {
   }
   options.signal.throwIfAborted()
   if (finish?.kind !== 'stop') {
-    throw fail(503, `Review model did not finish successfully (${finish?.kind ?? 'missing finish'})`, { code: finish?.failure?.code, finish: finish ?? null })
+    // Fail closed: partial JSON must never become findings. Providers that force
+    // extended thinking spend the same ceiling on reasoning, so `max-tokens`
+    // almost always means the configured budget is too small — say that, instead
+    // of surfacing a bare finish kind the user cannot act on.
+    const message = finish?.kind === 'max-tokens'
+      ? `Review model used all ${options.maxTokens} output tokens before finishing; raise the AI output limit (ai.maxTokens) or review a smaller diff`
+      : `Review model did not finish successfully (${finish?.kind ?? 'missing finish'})`
+    throw fail(503, message, { code: finish?.failure?.code, finish: finish ?? null })
   }
   const body = [...blocks.values()].map(block => block.text).join('\n').trim()
   if (!body) throw fail(503, 'Review model returned no text')
@@ -593,7 +617,7 @@ export function createWorkflows({ ctx, store, filePath, getPullRequest, getIssue
     if (typeof selection?.provider !== 'string' || !selection.provider.trim() || typeof selection?.model !== 'string' || !selection.model.trim()) {
       throw fail(503, 'Configure a native AI provider and model before creating a review')
     }
-    const config = { provider: selection.provider, model: selection.model, maxTokens: MAX_TOKENS }
+    const config = { provider: selection.provider, model: selection.model, maxTokens: tokenBudget(selection) }
     disk.read() // Do not invoke the provider if prior audit state cannot be recovered.
     const genKey = JSON.stringify([resolve(filePath), repoKey, number])
     if (generating.has(genKey)) throw fail(409, 'Review generation is already in progress for this pull request')

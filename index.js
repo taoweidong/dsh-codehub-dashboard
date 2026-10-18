@@ -104,7 +104,7 @@ function defaultConfig() {
     instances: [],         // { id, name, host (e.g. github.com), token }
     repos: [],             // { id, instance, path:'owner/name', localPath?, enabled, defaultBranch? }
     organizations: [],
-    ai: { provider: '', model: '' },
+    ai: { provider: '', model: '', maxTokens: 16384 },
     http: { perPage: 100, detailLimit: 25, timeoutMs: 15000 },
   }
 }
@@ -124,6 +124,11 @@ function createConfigStore(filePath, log) {
     out.repos = Array.isArray(cfg?.repos) ? cfg.repos : []
     out.organizations = Array.isArray(cfg?.organizations) ? cfg.organizations : []
     out.ai = { ...base.ai, ...(cfg?.ai ?? {}) }
+    // Blank means "use the workflow default"; anything else is clamped so a
+    // hand-edited config cannot ask a provider for an unbounded completion.
+    out.ai.maxTokens = String(out.ai.maxTokens ?? '').trim() === ''
+      ? base.ai.maxTokens
+      : Math.max(1024, Math.min(32768, Number(out.ai.maxTokens) || base.ai.maxTokens))
     out.http.perPage = Math.max(1, Math.min(100, Number(out.http.perPage) || 100))
     out.http.detailLimit = Math.max(0, Math.min(50, Number(out.http.detailLimit) || 0))
     out.http.timeoutMs = Math.max(1000, Math.min(60000, Number(out.http.timeoutMs) || 15000))

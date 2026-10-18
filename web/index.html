@@ -708,7 +708,7 @@ function repoCard(r){ const c=r.counts; const tot=Math.max(1,c.open+c.merged+c.c
   </div></div>`; }
 
 /* ---------- settings ---------- */
-function draft(){ if(!state.configDraft&&state.boot) state.configDraft=JSON.parse(JSON.stringify(state.boot.config)); const c=state.configDraft;if(c){c.instances??=[];c.repos??=[];c.organizations??=[];c.me??={};c.ai??={provider:"",model:""};}return c; }
+function draft(){ if(!state.configDraft&&state.boot) state.configDraft=JSON.parse(JSON.stringify(state.boot.config)); const c=state.configDraft;if(c){c.instances??=[];c.repos??=[];c.organizations??=[];c.me??={};c.ai??={provider:"",model:"",maxTokens:16384};}return c; }
 function viewSettings(){ const cfg=draft(); if(!cfg) return `<div class="wrap"><div class="empty">配置加载失败或尚未就绪，请刷新页面重试。</div></div>`;
   const provDesc={auto:"自动：优先 gh CLI → HTTP API（如配置了 token）",gh:"gh CLI：使用 GitHub 官方命令行工具拉取真实 PR / Review / Comment 数据（需 gh auth login 或 GH_TOKEN）",http:"REST API：直接调用 GitHub REST API v3（需在「实例」中配置 Personal Access Token）",git:"Git 元信息：仅从本地 git 仓库读取默认分支等元数据，不拉取 MR（需配合 gh 或 HTTP 使用）"};
   return `<div class="wrap"><div class="setform">
@@ -784,7 +784,9 @@ function orgRow(o,i,cfg){const instances=cfg.instances.length?cfg.instances:[{id
 function modelFields(cfg){const providers=state.models||[],models=providers.find(p=>p.id===cfg.ai.provider)?.models||[];
   const options=(rows,value)=>`<option value="">请选择</option>${rows.map(x=>`<option value="${esc(x.id)}"${x.id===value?" selected":""}>${esc(x.name||x.id)}</option>`).join("")}${value&&!rows.some(x=>x.id===value)?`<option selected value="${esc(value)}">${esc(value)}（当前不可用）</option>`:""}`;
   return `${state.modelsError?`<div class="errbox">无法读取 DSH 模型：${esc(state.modelsError)}。请在 DSH 模型设置完成配置，再重新加载。</div>`:!providers.length?'<p class="muted">尚无可用模型；请先在 DSH 原生模型设置中配置。</p>':""}
-    <div class="row2"><div class="fld"><label for="cfgAiProvider">模型提供方</label><select id="cfgAiProvider">${options(providers,cfg.ai.provider)}</select></div><div class="fld"><label for="cfgAiModel">评审模型</label><select id="cfgAiModel">${options(models,cfg.ai.model)}</select></div></div>`;}
+    <div class="row2"><div class="fld"><label for="cfgAiProvider">模型提供方</label><select id="cfgAiProvider">${options(providers,cfg.ai.provider)}</select></div><div class="fld"><label for="cfgAiModel">评审模型</label><select id="cfgAiModel">${options(models,cfg.ai.model)}</select></div></div>
+    <div class="fld"><label for="cfgAiMaxTokens">输出上限（tokens）</label><input id="cfgAiMaxTokens" type="number" min="1024" max="32768" step="1024" value="${esc(String(cfg.ai.maxTokens??16384))}" placeholder="16384"/>
+      <div class="muted" style="font-size:var(--fs-xs);margin-top:var(--sp-1)">推理型模型会把思考过程也计入这个上限；检视失败提示 max-tokens 时把它调大（1024–32768）。</div></div>`;}
 
 function discoverBox(){ const d=state.discover,ws=state.discoverWs||CWD;
   if(!d.length) return `<div class="muted" style="font-size:var(--fs-sm);margin-top:var(--sp-2)">工作区（${esc(ws||"未指定")}）下未发现 Git 仓库。</div>`;
@@ -1065,6 +1067,7 @@ function updateConfigField(t){if(state.view!=="settings")return false;const c=dr
   else if(t.id==="cfgMeLogin")c.me.login=t.value;
   else if(t.id==="cfgGhPath")c.ghPath=t.value;
   else if(t.id==="cfgAiModel")c.ai.model=t.value;
+  else if(t.id==="cfgAiMaxTokens"){const n=Math.round(Number(t.value));c.ai.maxTokens=Number.isFinite(n)&&n>0?n:(c.ai.maxTokens??16384);}
   else return false;return true;
 }
 document.addEventListener("change",(e)=>{

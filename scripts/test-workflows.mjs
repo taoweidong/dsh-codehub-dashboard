@@ -8,7 +8,7 @@ const moduleUnderTest = await import('../workflows.js').catch(error => {
   if (error.code !== 'ERR_MODULE_NOT_FOUND') throw error
   return {}
 })
-const { createWorkflows, parseReviewOutput, normalizeFindings, composeReviewBody, composeIssueBody, composeIssueTitle } = moduleUnderTest
+const { createWorkflows, parseReviewOutput, normalizeFindings, composeReviewBody, composeIssueBody, composeIssueTitle, tokenBudget } = moduleUnderTest
 const copy = value => JSON.parse(JSON.stringify(value))
 const reviewInput = { repoKey: 'github:org/repo', number: 12, confirmed: true }
 const issueInput = { repoKey: 'github:org/repo', number: 7, confirmed: true }
@@ -205,7 +205,7 @@ test('review logs exact native input, has no tools, and persists a detached audi
   assert.equal(request.model, 'model-1')
   assert.equal(request.system, undefined, 'system input must be derived from logged surface')
   assert.equal(request.tools, undefined)
-  assert.ok(request.maxTokens > 0 && request.maxTokens <= 8192)
+  assert.ok(request.maxTokens > 0 && request.maxTokens <= 32_768)
   assert.match(JSON.stringify(request.messages), /untrusted/i)
   assert.match(request.messages[0].content[0].text, /do not|never/i)
   assert.deepEqual(draft.request.messages, request.messages)
@@ -220,6 +220,41 @@ test('review logs exact native input, has no tools, and persists a detached audi
   assert.equal((await f.newWorkflows().getReview(id)).body, 'Check null input.')
   assert.equal((await f.newWorkflows().getReview(id)).headSha, sha)
   assert.deepEqual(readdirSync(f.dir), ['workflows.json'], 'no leftover temporary files')
+})
+
+test('review budget covers forced-thinking providers and clamps configuration', async t => {
+  // A provider that pins enable_thinking=true charges reasoning against the same
+  // ceiling as the JSON payload; a 6144 budget died as `max-tokens` in the host.
+  assert.equal(tokenBudget({}), 16_384)
+  assert.equal(tokenBudget({ maxTokens: '' }), 16_384)
+  assert.equal(tokenBudget({ maxTokens: Number.NaN }), 16_384)
+  assert.equal(tokenBudget({ maxTokens: 0 }), 16_384)
+  assert.equal(tokenBudget({ maxTokens: 200 }), 1024)
+  assert.equal(tokenBudget({ maxTokens: 10_000_000 }), 32_768)
+  assert.equal(tokenBudget({ maxTokens: '8192' }), 8192)
+  const f = fixture(t)
+  await f.workflows.createReview(reviewInput)
+  assert.equal(f.calls.requests[0].maxTokens, 16_384)
+  const header = f.sessions.get([...f.sessions.keys()][0]).events.find(e => e.type === 'request/header')
+  assert.equal(header.data.header.config.maxTokens, 16_384, 'logged request header must match the request')
+  f.config.ai.maxTokens = 24_576
+  await f.newWorkflows().createReview(reviewInput)
+  assert.equal(f.calls.requests[1].maxTokens, 24_576)
+})
+
+test('max-tokens terminal failure tells the operator how to raise the budget', async t => {
+  const f = fixture(t)
+  f.chunks[f.chunks.length - 1] = { type: 'finish', reason: { kind: 'max-tokens' } }
+  await assert.rejects(() => f.newWorkflows().createReview(reviewInput), error => {
+    assert.equal(error.status, 503)
+    assert.match(error.message, /16384/)
+    assert.match(error.message, /ai\.maxTokens/)
+    assert.deepEqual(error.finish, { kind: 'max-tokens' })
+    return true
+  })
+  const state = JSON.parse(readFileSync(f.filePath, 'utf8'))
+  assert.ok(state.drafts.every(d => d.status !== 'draft'), 'partial output must never become a draft')
+  assert.equal(f.calls.posts.length, 0)
 })
 
 test('review keeps logged model input immutable through native middleware', async t => {

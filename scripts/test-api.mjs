@@ -207,6 +207,12 @@ test('API validates writes, exposes Issues and does not block config saves on up
     const saved = await post('config.set', { provider: 'git', repos: [], organizations: [], ai: { provider: '', model: '' } })
     assert.equal(saved.status, 200)
     assert.equal(saved.body.refreshQueued, true)
+    // The AI output budget is normalized on write: blank means "workflow
+    // default", and hand-edited extremes cannot escape the clamp.
+    assert.equal(saved.body.config.ai.maxTokens, 16_384)
+    assert.equal((await post('config.set', { ai: { maxTokens: 999_999 } })).body.config.ai.maxTokens, 32_768)
+    assert.equal((await post('config.set', { ai: { maxTokens: 200 } })).body.config.ai.maxTokens, 1024)
+    assert.equal((await post('config.set', { ai: { maxTokens: '' } })).body.config.ai.maxTokens, 16_384)
     const issues = await (await fetch(base + 'issues')).json()
     assert.equal(issues.ok, true)
     assert.deepEqual(issues.issues, [])

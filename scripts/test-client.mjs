@@ -510,6 +510,21 @@ test('settings accurately describes GitHub gh and HTTP workflow support', () => 
   assert.doesNotMatch(content, /工作流仅支持 GitHub gh 数据源/);
 });
 
+test('settings exposes the review output budget so max-tokens failures are self-serviceable', () => {
+  const s = spa();
+  s.run(`state.view='settings'`);
+  const content = s.run('viewSettings()');
+  assert.match(content, /id="cfgAiMaxTokens"/);
+  assert.match(content, /min="1024"/);
+  assert.match(content, /max="32768"/);
+  assert.match(content, /value="16384"/);
+  s.run(`updateConfigField({id:'cfgAiMaxTokens',value:'24576'})`);
+  assert.equal(s.run('draft().ai.maxTokens'), 24_576);
+  // Clearing the box must not silently drop the operator's budget.
+  s.run(`updateConfigField({id:'cfgAiMaxTokens',value:''})`);
+  assert.equal(s.run('draft().ai.maxTokens'), 24_576);
+});
+
 test('overview failure renders a retryable error instead of pretending there is no data', async () => {
   const s = spa();
   s.run(`state.overview=null;state.overviewError="";state.overviewLoaded=false`);

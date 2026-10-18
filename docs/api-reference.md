@@ -306,6 +306,8 @@ Issue 详情（含分页拉取的评论）。**参数：** `repoKey`、`number`�
 
 状态取值：`generating | failed | draft | publishing | publish_unknown | published`。失败时 `failure: { message, finish? }`，响应 HTTP 状态取 `err.status`（服务缺失 503、PR 已关闭/标识变化 409）。
 
+**输出预算（`ai.maxTokens`）**：检视请求的 `maxTokens` 取配置项 `ai.maxTokens`，默认 `16384`，写入时被钳制在 `1024–32768`（空值回落默认）。部分提供方把 `enable_thinking` 限制为必须为 `true`，推理消耗与 JSON 产出**共用**这一个上限；预算不足时模型以 `finish.kind = "max-tokens"` 结束，服务端按 fail-closed 拒收（`failure.message` 会明确提示「used all N output tokens … raise the AI output limit (ai.maxTokens)」，**不会**把半截 JSON 当成检视结果）。
+
 ---
 
 ## GET /codehub/api?op=review.get
