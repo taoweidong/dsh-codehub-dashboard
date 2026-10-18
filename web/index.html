@@ -261,6 +261,19 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,te
 #hostStatus{margin:0;border-radius:0;padding:var(--sp-2) var(--sp-4);font-size:var(--fs-sm);background:var(--panel2);color:var(--muted)}
 @media(max-width:700px){.review-grid{grid-template-columns:1fr}.editor.diff{min-height:230px}.mrrow{flex-wrap:wrap}.mrrow .metrics{width:100%;padding-left:62px;flex-wrap:wrap}.main{padding:var(--sp-3)}.topbar{padding:var(--sp-2) var(--sp-3);gap:var(--sp-2)}.nav button{padding:var(--sp-2) var(--sp-2)}.hbar-row{grid-template-columns:110px 1fr 36px}.listrow.org{grid-template-columns:1fr 1fr}.toolbar>*{max-width:100%}.drawer .dbd{padding:var(--sp-3)}.brand{font-size:var(--fs-base)}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}.kpi:hover{transform:none}}
+.flist{display:flex;flex-direction:column;gap:var(--sp-2);margin:var(--sp-2) 0}
+.frow{border:1px solid var(--border2);border-radius:var(--r-md);padding:var(--sp-2) var(--sp-3);background:var(--surface2)}
+.fhl{display:flex;gap:var(--sp-2);align-items:center;flex-wrap:wrap;cursor:pointer}
+.fhl .ftitle{font-weight:600;overflow-wrap:anywhere}
+.fhl .floc{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text2)}
+.fmeta{display:flex;gap:var(--sp-2);align-items:center;flex-wrap:wrap;margin:var(--sp-1) 0 0 var(--sp-5)}
+.fdet{margin-top:var(--sp-2);display:flex;flex-direction:column;gap:var(--sp-2)}
+.fdet p{margin:0}
+.chip.blocker{background:rgba(239,68,68,.14);color:#dc2626}
+.chip.major{background:rgba(245,158,11,.16);color:#b45309}
+.chip.minor{background:rgba(59,130,246,.14);color:#2563eb}
+.chip.nit{background:rgba(107,114,128,.14);color:#4b5563}
+.mrrow{position:relative}
 </style>
 </head>
 <body>
@@ -311,14 +324,14 @@ function relTime(iso){ if(!iso) return "—"; const t=new Date(iso).getTime(); i
 const absTime = (iso) => iso ? new Date(iso).toLocaleString("zh-CN",{hour12:false}) : "";
 const fmtNum = (n) => Number(n||0).toLocaleString("zh-CN");
 
-function timeoutSignal(){ try{ return typeof AbortSignal!=="undefined"&&AbortSignal.timeout?AbortSignal.timeout(20000):undefined; }catch{ return undefined; } }
+function timeoutSignal(ms){ try{ return typeof AbortSignal!=="undefined"&&AbortSignal.timeout?AbortSignal.timeout(ms||20000):undefined; }catch{ return undefined; } }
 function timeoutError(e){ return e&&(e.name==="TimeoutError"||e.name==="AbortError")?new Error("请求超时（20 秒），请检查网络后重试"):e; }
 async function api(op, params){ const u=new URL("/codehub/api", location.origin); u.searchParams.set("op",op);
   for(const [k,v] of Object.entries(params||{})) if(v!==undefined&&v!==null&&v!=="") u.searchParams.set(k,String(v));
   let r; try{ r=await fetch(u,{headers:{accept:"application/json"},signal:timeoutSignal()}); }catch(e){ throw timeoutError(e); }
   const j=await r.json().catch(()=>({ok:false,error:"bad response"}));
   if(!r.ok||!j.ok) throw new Error(j.error||("HTTP "+r.status)); return j; }
-async function apiPost(op, body){ let r; try{ r=await fetch("/codehub/api?op="+encodeURIComponent(op),{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body||{}),signal:timeoutSignal()}); }catch(e){ throw timeoutError(e); }
+async function apiPost(op, body, opts){ let r; try{ r=await fetch("/codehub/api?op="+encodeURIComponent(op),{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body||{}),signal:timeoutSignal(opts&&opts.timeoutMs)}); }catch(e){ throw timeoutError(e); }
   const j=await r.json().catch(()=>({ok:false,error:"bad response"})); if(!r.ok||!j.ok) throw new Error(j.error||("HTTP "+r.status)); return j; }
 
 function toast(msg, ms){ const t=$("#toast"); t.textContent=msg; t.classList.add("show"); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"), ms||2600); }
@@ -650,7 +663,19 @@ function viewIssues(){const ov=state.overview;if(!ov)return overviewPlaceholder(
     <input type="text" id="iAssignee" aria-label="Issue 负责人" placeholder="负责人 GitHub 登录名" value="${esc(f.assignee)}"/>
     <span class="count-pill">${data?countLabel(data.issues,data.total):"—"}</span></div>${data&&state.issueError?staleNotice(state.issueError):""}${partialErrors(data?.errors)}${coverageNote(data?.coverage??ov.coverage)}
     <div class="card mrlist">${body}</div></div>`;}
-function issueRow(i){return `<div class="mrrow" role="button" tabindex="0" data-issue="${esc(i.repoKey)}|${esc(i.number)}"><span class="no">#${esc(i.number)}</span><div class="body"><div class="t1">${stateChip(i)}<span class="title">${esc(i.title)}</span>${(i.labels||[]).map(l=>chip("label",l)).join("")}</div><div class="t2"><span class="repo-tag">${esc(i.repoPath||i.repoKey)}</span>${avatar(i.author)}<span>${esc(i.author?.name||i.author?.login)}</span><span>负责人：${esc((i.assignees||[]).join(", ")||"未分配")}</span><span>${relTime(i.updatedAt)}</span></div></div></div>`;}
+function issueRow(i){const canDev=state.boot?.capabilities?.develop===true;
+  return `<div class="mrrow" role="button" tabindex="0" data-issue="${esc(i.repoKey)}|${esc(i.number)}"><span class="no">#${esc(i.number)}</span><div class="body"><div class="t1">${stateChip(i)}<span class="title">${esc(i.title)}</span>${(i.labels||[]).map(l=>chip("label",l)).join("")}</div><div class="t2"><span class="repo-tag">${esc(i.repoPath||i.repoKey)}</span>${avatar(i.author)}<span>${esc(i.author?.name||i.author?.login)}</span><span>负责人：${esc((i.assignees||[]).join(", ")||"未分配")}</span><span>${relTime(i.updatedAt)}</span></div></div>${canDev?`<button class="btn sm" data-quickdev="${esc(i.repoKey)}|${esc(i.number)}" aria-label="快速开始开发 Issue #${esc(i.number)}">快速开始开发</button>`:""}</div>`;}
+async function quickDevelop(pair){const [repoKey,number]=pair.split("|");const key=repoKey+"|"+number;
+  if(!developmentWork.has(key))developmentWork.set(key,{sessionId:"",pending:false,error:""});
+  const w=developmentWork.get(key);
+  if(w.pending){toast("正在处理中…");return;}
+  if(state.boot?.capabilities?.develop!==true||!host.available||!host.openSession){toast("DSH 原生开发能力不可用；请在 DSH 内打开 CodeHub 并检查宿主服务。",4500);return;}
+  if(!w.sessionId&&!confirm("为 Issue #"+number+" 创建或复用 DSH 原生开发会话？需要该仓库已配置本地克隆路径。后续操作在 DSH 中进行。"))return;
+  w.pending=true;w.error="";render();
+  try{if(!w.sessionId){const j=await apiPost("issue.develop",{repoKey,number:Number(number),confirmed:true});w.sessionId=j.sessionId;}
+    await hostRequest("open-session",w.sessionId);}
+  catch(e){w.error=e.message;toast("开发会话启动失败："+e.message,5000);}
+  finally{w.pending=false;render();}}
 
 function viewRepos(){ const ov=state.overview; if(!ov) return overviewPlaceholder();
   if(!ov.repos.length) return `${overviewFailureNote()}${emptyState()}`;
@@ -683,7 +708,7 @@ function repoCard(r){ const c=r.counts; const tot=Math.max(1,c.open+c.merged+c.c
   </div></div>`; }
 
 /* ---------- settings ---------- */
-function draft(){ if(!state.configDraft&&state.boot) state.configDraft=JSON.parse(JSON.stringify(state.boot.config)); const c=state.configDraft;if(c){c.instances??=[];c.repos??=[];c.organizations??=[];c.me??={};c.ai??={provider:"",model:""};}return c; }
+function draft(){ if(!state.configDraft&&state.boot) state.configDraft=JSON.parse(JSON.stringify(state.boot.config)); const c=state.configDraft;if(c){c.instances??=[];c.repos??=[];c.organizations??=[];c.me??={};c.ai??={provider:"",model:"",maxTokens:16384};}return c; }
 function viewSettings(){ const cfg=draft(); if(!cfg) return `<div class="wrap"><div class="empty">配置加载失败或尚未就绪，请刷新页面重试。</div></div>`;
   const provDesc={auto:"自动：优先 gh CLI → HTTP API（如配置了 token）",gh:"gh CLI：使用 GitHub 官方命令行工具拉取真实 PR / Review / Comment 数据（需 gh auth login 或 GH_TOKEN）",http:"REST API：直接调用 GitHub REST API v3（需在「实例」中配置 Personal Access Token）",git:"Git 元信息：仅从本地 git 仓库读取默认分支等元数据，不拉取 MR（需配合 gh 或 HTTP 使用）"};
   return `<div class="wrap"><div class="setform">
@@ -759,7 +784,9 @@ function orgRow(o,i,cfg){const instances=cfg.instances.length?cfg.instances:[{id
 function modelFields(cfg){const providers=state.models||[],models=providers.find(p=>p.id===cfg.ai.provider)?.models||[];
   const options=(rows,value)=>`<option value="">请选择</option>${rows.map(x=>`<option value="${esc(x.id)}"${x.id===value?" selected":""}>${esc(x.name||x.id)}</option>`).join("")}${value&&!rows.some(x=>x.id===value)?`<option selected value="${esc(value)}">${esc(value)}（当前不可用）</option>`:""}`;
   return `${state.modelsError?`<div class="errbox">无法读取 DSH 模型：${esc(state.modelsError)}。请在 DSH 模型设置完成配置，再重新加载。</div>`:!providers.length?'<p class="muted">尚无可用模型；请先在 DSH 原生模型设置中配置。</p>':""}
-    <div class="row2"><div class="fld"><label for="cfgAiProvider">模型提供方</label><select id="cfgAiProvider">${options(providers,cfg.ai.provider)}</select></div><div class="fld"><label for="cfgAiModel">评审模型</label><select id="cfgAiModel">${options(models,cfg.ai.model)}</select></div></div>`;}
+    <div class="row2"><div class="fld"><label for="cfgAiProvider">模型提供方</label><select id="cfgAiProvider">${options(providers,cfg.ai.provider)}</select></div><div class="fld"><label for="cfgAiModel">评审模型</label><select id="cfgAiModel">${options(models,cfg.ai.model)}</select></div></div>
+    <div class="fld"><label for="cfgAiMaxTokens">输出上限（tokens）</label><input id="cfgAiMaxTokens" type="number" min="1024" max="32768" step="1024" value="${esc(String(cfg.ai.maxTokens??16384))}" placeholder="16384"/>
+      <div class="muted" style="font-size:var(--fs-xs);margin-top:var(--sp-1)">推理型模型会把思考过程也计入这个上限；检视失败提示 max-tokens 时把它调大（1024–32768）。</div></div>`;}
 
 function discoverBox(){ const d=state.discover,ws=state.discoverWs||CWD;
   if(!d.length) return `<div class="muted" style="font-size:var(--fs-sm);margin-top:var(--sp-2)">工作区（${esc(ws||"未指定")}）下未发现 Git 仓库。</div>`;
@@ -810,7 +837,54 @@ function renderMrDetail(d){const m=d.mr,diff=d.diff;
     ${(m.comments||[]).map(cmtRow).join("")||'<p class="muted">暂无检视意见</p>'}`;
   renderReviewWorkspace(d);
 }
-function workFor(d){if(!reviewWork.has(d.key))reviewWork.set(d.key,{draft:null,body:"",preview:null,pending:"",error:""});return reviewWork.get(d.key);}
+function workFor(d){if(!reviewWork.has(d.key))reviewWork.set(d.key,{draft:null,body:"",preview:null,pending:"",error:"",loaded:false,selected:null,selectedInit:false,filing:false,fileResults:null,fileError:""});return reviewWork.get(d.key);}
+const SEV_LABEL={blocker:"阻塞",major:"重要",minor:"一般",nit:"建议"};
+const ISSUE_ST={idle:"未提 Issue",creating:"创建中",created:"已创建 Issue",failed:"创建失败",unknown:"结果未知"};
+const AUTO_SELECT=new Set(["blocker","major"]);
+function findingLockReason(f){const s=f?.issueStatus;if(s==="created")return "已在 GitHub 创建，不可重复提交";if(s==="creating")return "正在创建中，请先核实";if(s==="unknown")return "结果未知，不会自动重试；请到 GitHub 核实";return null;}
+function syncSelection(w){if(!w.selected)w.selected=new Set();
+  if(w.draft?.structured!==true||!Array.isArray(w.draft.findings))return;
+  for(const f of w.draft.findings){if(!w.selectedInit&&AUTO_SELECT.has(f.severity))w.selected.add(f.id);}
+  w.selectedInit=true;}
+function findingLocation(f){return f.file?`${f.file}${f.line?":"+f.line:""}`:"未指定位置";}
+function verifyHint(f){
+  const file=f.fileVerified===true?"已命中变更列表":f.fileVerified===false?"未命中变更列表":"变更列表截断无法核对";
+  const ev=f.evidenceVerified===true?"已核对":f.evidenceVerified===false?"未在 diff 中定位":"上下文截断无法核对";
+  return `文件定位：${file}；证据定位：${ev}`;}
+function renderFindingsBlock(w,d){
+  const f=(w.draft?.structured===true&&Array.isArray(w.draft.findings))?w.draft.findings:null;
+  if(!f||!f.length)return w.draft?.structured===false?'<div class="sect">AI 问题清单</div><p class="muted">本次模型返回不是结构化清单，已按纯文本草稿处理。重新生成可获得可勾选的问题清单。</p>':"";
+  const rows=f.map(x=>{
+    const lock=findingLockReason(x);
+    const checked=w.selected?.has(x.id)&&!lock;
+    const st=x.issueStatus,issue=x.issue;
+    return `<div class="frow">
+      <label class="fhl"><input type="checkbox" data-finding="${esc(x.id)}" ${checked?"checked":""} ${lock||w.filing?"disabled":""}>
+      <span class="chip ${x.severity}">${SEV_LABEL[x.severity]||esc(x.severity)}</span>
+      <span class="ftitle">${esc(x.title)}</span>
+      <span class="floc">${esc(findingLocation(x))}</span></label>
+      <div class="fmeta"><span class="chip sm">${ISSUE_ST[st]||esc(st)}</span>${issue?`<a class="btn sm" href="${esc(safeUrl(issue.url)||"")}" target="_blank" rel="noopener noreferrer">#${esc(issue.number)}</a>`:""}${lock?`<span class="muted">${esc(lock)}</span>`:""}</div>
+      <details><summary>详情与建议</summary><div class="fdet">
+        <p>${esc(x.detail||"无说明")}</p>
+        ${x.evidence?`<div class="muted">证据（模型引用）：</div><pre class="prose">${esc(x.evidence)}</pre>`:""}
+        <div class="muted">建议：${esc(x.suggestion||"无建议")}</div>
+        <div class="muted">${esc(verifyHint(x))}；置信度：${esc(x.confidence)}；分类：${esc(x.category)}</div>
+      </div></details></div>`;}).join("");
+  const n=[...(w.selected||[])].filter(id=>{const x=f.find(y=>y.id===id);return x&&!findingLockReason(x);}).length;
+  const tooMany=n>10;
+  return `<div class="sect">AI 问题清单（${f.length} 条）${w.draft?.findingsTruncated?" · 模型返回超过上限，仅保留前 12 条":""}</div>
+    <div class="notice">勾选要跟踪的问题后批量创建 GitHub Issue。Issue 正文自动带 MR 溯源与 AI 证据；创建后可继续走现有 Issue 开发流程。详情请在 GitHub 查看，此处不展示 diff。</div>
+    ${w.draft?.parseWarnings?.length?`<div class="notice warn">解析提示：${w.draft.parseWarnings.map(x=>esc(x)).join("；")}</div>`:""}
+    <div class="inline-actions">
+      <button class="btn sm" id="selectAllFindings" ${w.filing?"disabled":""}>全选</button>
+      <button class="btn sm" id="clearFindings" ${w.filing?"disabled":""}>清空</button>
+      <button class="btn primary" id="fileIssues" ${w.filing||n===0||tooMany?"disabled":""}>${w.filing?"创建中…":`创建 ${n} 个 Issue`}</button>
+    </div>
+    ${tooMany?`<div class="errbox">单次最多创建 10 个 Issue，请减少勾选。</div>`:""}
+    ${w.fileError?`<div class="errbox" role="alert">${esc(w.fileError)}。未成功的条目保留原状态，可重试；结果未知的条目不会自动重试。</div>`:""}
+    ${w.fileResults?`<div class="notice">上次结果：${w.fileResults.map(r=>`${esc(r.findingId)} ${ISSUE_ST[r.status]||esc(r.status)}`).join("；")}${w.fileResults.some(r=>r.status==="unknown")?" · 有条目结果未知，请先到 GitHub 核实。":""}</div>`:""}
+    <div class="flist">${rows}</div>`;
+}
 const DRAFT_ST={generating:"生成中",draft:"草稿",publishing:"发布中（状态可能已过期）",published:"已发布",publish_unknown:"发布状态未知",superseded:"已被新草稿取代",failed:"生成失败"};
 function draftNeedsVerify(draft){return !!draft&&(draft.needsVerification===true||draft.status==="publishing"||draft.status==="publish_unknown");}
 function renderReviewWorkspace(d=detail){if(!d||d.kind!=="mr"||!currentDetail(d))return;const w=workFor(d),published=w.draft?.status==="published",unknown=draftNeedsVerify(w.draft),canAI=state.boot?.capabilities?.ai===true;
@@ -822,13 +896,48 @@ function renderReviewWorkspace(d=detail){if(!d||d.kind!=="mr"||!currentDetail(d)
     <textarea id="reviewBody" class="editor" placeholder="生成草稿后可在此删改，只发布你确认的正文。" ${w.pending||published||unknown?"disabled":""}>${esc(w.body)}</textarea>
     ${w.error?`<div class="errbox" role="alert">${esc(w.error)}。草稿和编辑内容仍保留；不自动重试发布。</div>`:""}
     <div class="inline-actions"><button class="btn primary" id="previewReview" ${!w.draft||w.pending||published||unknown?"disabled":""}>预览待发布正文</button></div>
-    <div id="reviewPreview">${w.preview!==null?`<div class="notice">以下原文将作为一条评审发布；不会发布 diff、其它草稿或未选择的内容。</div><pre class="prose">${esc(w.preview)}</pre><button class="btn primary" id="publishReview" ${w.pending||published?"disabled":""}>${w.pending==="publish"?"发布中…":"确认发布此正文"}</button>`:""}</div>`;
+    <div id="reviewPreview">${w.preview!==null?`<div class="notice">以下原文将作为一条评审发布；不会发布 diff、其它草稿或未选择的内容。</div><pre class="prose">${esc(w.preview)}</pre><button class="btn primary" id="publishReview" ${w.pending||published?"disabled":""}>${w.pending==="publish"?"发布中…":"确认发布此正文"}</button>`:""}</div>
+    ${renderFindingsBlock(w,d)}`;
+  ensureReviewState(d);
 }
+// The draft used to live only in an in-memory Map, so reopening the MR lost every
+// finding and Issue association. review.latest restores it from the audit file;
+// a draft still generating is polled until it settles.
+function ensureReviewState(d){const w=workFor(d);
+  if(w.restore)return w.restore;
+  if(w.draft){w.restore=Promise.resolve();return w.restore;}
+  w.restore=(async()=>{try{const j=await api("review.latest",{repoKey:d.repoKey,number:d.number});if(!currentDetail(d))return;
+    if(j?.draft){w.draft=j.draft;w.body=j.draft.body||"";syncSelection(w);if(j.draft.status==="generating")scheduleReviewPoll(d);}}catch{}
+    finally{if(currentDetail(d))renderReviewWorkspace(d);}})();
+  return w.restore;}
+function scheduleReviewPoll(d){setTimeout(async()=>{const w=workFor(d);
+  if(!currentDetail(d)||!w.draft||w.draft.status!=="generating")return;
+  try{const j=await api("review.latest",{repoKey:d.repoKey,number:d.number});if(!currentDetail(d))return;
+    if(j?.draft){w.draft=j.draft;w.body=j.draft.body||"";syncSelection(w);}}catch{}
+  finally{if(currentDetail(d)){renderReviewWorkspace(d);if(workFor(d).draft?.status==="generating")scheduleReviewPoll(d);}}},5000);}
+async function fileSelectedIssues(){const d=detail;if(!d||d.kind!=="mr")return;const w=workFor(d);
+  if(w.filing)return;
+  const list=(w.draft?.structured===true&&Array.isArray(w.draft.findings))?w.draft.findings:[];
+  const ids=list.filter(f=>w.selected?.has(f.id)&&!findingLockReason(f)).map(f=>f.id);
+  if(!ids.length||ids.length>10){toast(ids.length>10?"单次最多创建 10 个 Issue":"请先勾选要跟踪的问题");return;}
+  if(!confirm(`将为选中的 ${ids.length} 个问题在该仓库创建 GitHub Issue（远程写入操作）。每个 Issue 会自动带上 MR 溯源与 AI 证据，且不自动指派。是否继续？`))return;
+  w.filing=true;w.error="";w.fileError="";w.fileResults=null;renderReviewWorkspace(d);
+  try{const j=await apiPost("review.issues.create",{id:w.draft.id,findingIds:ids,confirmed:true},{timeoutMs:150000});
+    w.draft=j.draft;w.fileResults=j.results;const ok=j.results.filter(r=>r.status==="created").length;
+    toast(`已创建 ${ok} 个 Issue${j.stopped?"（批次停止："+j.stopped+"）":""}`,4500);
+    if(j.results.some(r=>r.status==="unknown"))toast("有条目结果未知：可能已创建，请先到 GitHub 核实，不会自动重试。",6000);}
+  catch(e){w.fileError=e.message;}finally{w.filing=false;renderReviewWorkspace(d);}}
+async function toggleAllFindings(on){const d=detail;if(!d||d.kind!=="mr")return;const w=workFor(d);
+  const list=(w.draft?.structured===true&&Array.isArray(w.draft.findings))?w.draft.findings:[];
+  const targets=on?list.filter(f=>!findingLockReason(f)):list.filter(f=>f.issueStatus!=="created");
+  if(on)targets.forEach(f=>w.selected.add(f.id)); else targets.forEach(f=>w.selected.delete(f.id));
+  renderReviewWorkspace(d);}
+
 async function createReview(){const d=detail;if(!d||d.kind!=="mr"||!d.mr)return;const w=workFor(d);
   if(w.pending||w.draft?.status==="published"||draftNeedsVerify(w.draft)||state.boot?.capabilities?.ai!==true)return;
   if(!confirm("将此 MR 的 diff 发送给已配置的 DSH 模型以生成评审草稿。Diff 可能不完整；不会自动发布。"+(w.draft?"继续会替换当前草稿正文。":"")+"是否继续？"))return;
   w.pending="create";w.error="";w.preview=null;renderReviewWorkspace(d);
-  try{const j=await apiPost("review.create",{repoKey:d.repoKey,number:d.number,confirmed:true});w.draft=j.draft;w.body=j.draft.body||"";}
+  try{const j=await apiPost("review.create",{repoKey:d.repoKey,number:d.number,confirmed:true},{timeoutMs:150000});w.draft=j.draft;w.body=j.draft.body||"";w.selected=null;w.selectedInit=false;syncSelection(w);w.fileResults=null;w.fileError="";}
   catch(e){w.error=e.message;}finally{w.pending="";renderReviewWorkspace(d);}
 }
 function previewReview(){const d=detail;if(!d||d.kind!=="mr")return;const w=workFor(d);if(w.pending||!w.draft||w.draft.status==="published"||draftNeedsVerify(w.draft))return;
@@ -908,8 +1017,12 @@ async function refreshReviews(){await withBusy(async()=>{const pending=loadRevie
 /* ================= events ================= */
 document.addEventListener("click",async (e)=>{
   const navBtn=e.target.closest("[data-nav]"); if(navBtn){ nav(navBtn.dataset.nav); return; }
+  const devBtn=e.target.closest("[data-quickdev]"); if(devBtn){e.preventDefault();e.stopPropagation();await quickDevelop(devBtn.dataset.quickdev);return;}
   const mrEl=e.target.closest("[data-mr]"); if(mrEl){e.preventDefault();const [rk,num]=mrEl.dataset.mr.split("|");openMr(rk,Number(num));return;}
   const issueEl=e.target.closest("[data-issue]");if(issueEl){const [rk,num]=issueEl.dataset.issue.split("|");openIssue(rk,Number(num));return;}
+  if(e.target.closest("#selectAllFindings")){await toggleAllFindings(true);return;}
+  if(e.target.closest("#clearFindings")){await toggleAllFindings(false);return;}
+  if(e.target.closest("#fileIssues")){await fileSelectedIssues();return;}
   if(e.target.closest("#drawerClose")||e.target.closest("#backdrop")){ closeDrawer(); return; }
   if(e.target.closest("#createReview")){await createReview();return;}
   if(e.target.closest("#previewReview")){previewReview();return;}
@@ -954,10 +1067,14 @@ function updateConfigField(t){if(state.view!=="settings")return false;const c=dr
   else if(t.id==="cfgMeLogin")c.me.login=t.value;
   else if(t.id==="cfgGhPath")c.ghPath=t.value;
   else if(t.id==="cfgAiModel")c.ai.model=t.value;
+  else if(t.id==="cfgAiMaxTokens"){const n=Math.round(Number(t.value));c.ai.maxTokens=Number.isFinite(n)&&n>0?n:(c.ai.maxTokens??16384);}
   else return false;return true;
 }
 document.addEventListener("change",(e)=>{
   const t=e.target;if(updateConfigField(t))return;
+  const fb=t.dataset?.finding; if(fb&&detail?.kind==="mr"){const w=workFor(detail);
+    if(t.checked)w.selected.add(fb);else w.selected.delete(fb);
+    renderReviewWorkspace(detail);return;}
   if(t.id==="fRepo"){ state.mrFilters.repoKey=t.value; nav("mrs",flatMrFilters()); }
   else if(t.id==="fState"){ state.mrFilters.state=t.value; nav("mrs",flatMrFilters()); }
   else if(t.id==="fSort"){ state.mrFilters.sort=t.value; refreshMrs(); }

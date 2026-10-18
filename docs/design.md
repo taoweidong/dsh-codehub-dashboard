@@ -13,8 +13,8 @@
 在 DSH 左侧导航中提供 **CodeHub 工作区**，聚合多个 GitHub 仓库/组织的 Pull Request、Issue 与检视意见，并复用 DSH 已有能力完成两条工作流：
 
 - 看板：待处理 PR、待我评审、未解决意见、需我回复、CI 失败、仓库健康度。
-- AI 检视：调用宿主配置的模型生成检视草稿，用户编辑并**二次确认**后以 **COMMENT** 事件发布。
-- Issue 开发：核验本地克隆后，由宿主 `sessionController` 创建原生会话并提交 Issue 上下文。
+- AI 检视：调用宿主配置的模型，一次产出可发布草稿与结构化问题清单；草稿经用户编辑并**二次确认**后以 **COMMENT** 事件发布；问题清单经用户勾选并**单独确认**后批量创建 GitHub Issue（**从不自动创建**）。
+- Issue 开发：核验本地克隆后，由宿主 `sessionController` 创建原生会话并提交 Issue 上下文；列表行另提供「快速开始开发」入口。
 
 ### 1.2 核心约束
 
@@ -222,8 +222,16 @@ review.create {repoKey,number,confirmed:true}
   │   并在草稿正文尾部追加「检视范围受限」声明
   ├─ 落盘 status='generating'（先落盘再调模型）
   ├─ sessions.create + append(system/user/request/header) + flush
-  ├─ llm.stream(request, AbortSignal.timeout(120s)) → 汇总流式 block
-  └─ 落盘 status='draft'；失败则 status='failed' 并保留 failure
+  ├─ llm.stream(request, AbortSignal.timeout(120s)) → 汇总流式 block（模型输出上限 96KB）
+  ├─ parseReviewOutput(rawText, snapshot)
+  │    ├─ 成功：summary + findings 归一化（别名/截断/去重/排序/12 条上限）→ body 由清单合成
+  │    └─ 失败：structured=false，body 为原始文本（按 32KB 边界裁剪），findings=[]（降级不整体失败）
+  └─ 落盘 status='draft' + structured/reviewSummary/findings/findingsTruncated/parseWarnings；
+     失败则 status='failed' 并保留 failure
+  · 同一 MR 并发 → 409（进程内 generating 锁，避免前端超时后重复调用模型）
+
+review.latest {repoKey,number}（GET）
+  └─ 按 repoKey+number 取 createdAt 最新草稿（含 generating），无则 draft:null（200，不是 404）
 
 review.publish {id,body?,confirmed:true}
   ├─ 状态机：published 幂等返回（且禁止改正文）/ publishing|publish_unknown → 409 needsVerification
@@ -234,9 +242,21 @@ review.publish {id,body?,confirmed:true}
         { event:'COMMENT', body, commit_id }
        · 成功 → published + 远端结果
        · 任何派发后错误 → publish_unknown + needsVerification，永不自动重发
+
+review.issues.create {id,findingIds[],confirmed:true}
+  ├─ 确认门 + 严格 findingIds 校验（非空/去重/1–10/格式）+ filing 锁（并发 → 409）
+  ├─ 草稿需 structured===true 且有清单（否则 409）；creating/unknown 条目 → 409 needsVerification
+  ├─ created 条目幂等跳过（不重复 POST）；队列为空直接 200 返回
+  ├─ 顺序逐条：issueStatus='creating' → createIssue() → created | failed | unknown
+  │    · knownNotCreated（4xx / 未派发）→ failed（可重试）
+  │    · 网络/超时/5xx/响应无法解析 → unknown（永不自动重试）
+  │    · fail-fast：遇错即停，剩余保持 idle
+  └─ 90s 批次预算与配置变更检测 → stopped: null|timeout|config|error
+     createIssue() 固定 POST repos/{path}/issues {title,body}，端点与字段名不受客户端控制；
+     该路径启用 preserveStatus 保留 GitHub 原始状态码（评审发布路径行为不变）。
 ```
 
-检视是**辅助调用而非 Agent 回合**：结果与失败都活在审计工件里，不伪造 assistant 结算或 turn id。请求不带任何工具，GitHub 内容以「不可信数据」前缀送入模型。
+检视是**辅助调用而非 Agent 回合**：结果与失败都活在审计工件里，不伪造 assistant 结算或 turn id。请求不带任何工具，GitHub 内容以「不可信数据」前缀送入模型。`publish_unknown` 与 `unknown` 同哲学：不确定就停，永不自动重试。
 
 ### 6.2 Issue 开发（`issue.develop`）
 
@@ -300,12 +320,12 @@ review.publish {id,body?,confirmed:true}
 1. `ctx.connection.admit(req)`：方法不存在 → 503；返回含 `rejection` → 401（登录失效）或 403（未通过信任校验）。校验通过前不读配置、不访问 GitHub。
 2. `ensureBoot()`：配置加载失败时回滚 `booted`，允许下次重试。
 3. 路径分派：`/codehub`（及 `/`、`/index.html`）返回 SPA（CSP + `nosniff` + `no-referrer` + `no-store`）；`/codehub/api` 进入 op；其它 404。
-4. 写 op（`config.set`、`config.test`、`review.create`、`review.publish`、`issue.develop`）：非 POST → 405；Origin 主机不匹配或 `sec-fetch-site: cross-site` → 403；`content-type` 非 `application/json` → 415；其余 op 非 GET → 405。
+4. 写 op（`config.set`、`config.test`、`review.create`、`review.publish`、`review.issues.create`、`issue.develop`）：非 POST → 405；Origin 主机不匹配或 `sec-fetch-site: cross-site` → 403；`content-type` 非 `application/json` → 415；其余 op 非 GET → 405。
 5. body 上限 256KB，`readBody` 超限后立即短路后续 data 事件。
 
 ### 8.2 op 一览
 
-`boot`、`summary`、`overview`、`mrs`、`mr`、`mr.diff`、`issues`、`issue`、`reviews`、`activity`、`refresh`、`models`、`review.create`、`review.get`、`review.publish`、`issue.develop`、`config.get`、`config.set`、`config.test`、`repos.discover`（共 20 个）。
+`boot`、`summary`、`overview`、`mrs`、`mr`、`mr.diff`、`issues`、`issue`、`reviews`、`activity`、`refresh`、`models`、`review.create`、`review.get`、`review.latest`、`review.publish`、`review.issues.create`、`issue.develop`、`config.get`、`config.set`、`config.test`、`repos.discover`（共 22 个）。
 
 `config.set` 立即返回 `{ok, config:masked, overview:null, refreshQueued:true}`，随后在后台刷新 —— 保存不等待上游。
 

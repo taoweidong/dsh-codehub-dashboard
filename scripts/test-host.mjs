@@ -83,7 +83,10 @@ async function main() {
   console.log('\n📡 Testing /codehub/api endpoints...')
   const boot = await get('/codehub/api?op=boot')
   assert('boot ok', boot.data.ok === true)
-  assert('boot version', boot.data.version === '0.1.5')
+  // Read the manifest instead of hardcoding, so a version bump cannot silently
+  // leave this assertion behind (the same fact is asserted again at the end).
+  const manifestVersion = JSON.parse(readFileSync(join(pluginDir, 'package.json'), 'utf8')).version
+  assert('boot version', boot.data.version === manifestVersion, `${boot.data.version} vs ${manifestVersion}`)
   assert('boot has config', !!boot.data.config)
   assert('boot config masked', !boot.data.config.instances?.some?.((i) => i.token && !i.token.startsWith('****')))
 

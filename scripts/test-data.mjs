@@ -73,6 +73,20 @@ test('overview includes issue counts and explains sampling', () => {
   assert.equal(overview.repos[0].counts.openIssues, 1)
 })
 
+test('overview summary aggregates per-repository counts exactly once', () => {
+  const snap = (repoKey, mrs) => ({ repoKey, repo: { path: repoKey.split(':')[1] }, mrs, issues: [] })
+  const mr = (number, state) => ({ number, state, author: { login: 'me' }, createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-10-02T00:00:00Z' })
+  const overview = data.buildOverview([
+    snap('gh:a/b', [mr(1, 'open'), mr(2, 'merged')]),
+    snap('gh:c/d', [mr(3, 'open'), mr(4, 'closed')]),
+  ], { me: { login: 'me' } })
+  assert.equal(overview.summary.repos, 2)
+  assert.equal(overview.summary.openMrs, 2)
+  assert.equal(overview.summary.mergedMrs, 1)
+  assert.equal(overview.summary.closedMrs, 1)
+  assert.equal(overview.repos.reduce((sum, repo) => sum + repo.counts.total, 0), 4)
+})
+
 // `unresolvedComments: 0` has two very different meanings: "no thread is
 // unresolved" vs "resolution was never fetched" (REST list payloads carry no
 // thread state). resolutionAvailable tells the two apart without changing the

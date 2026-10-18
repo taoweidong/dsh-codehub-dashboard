@@ -48,7 +48,16 @@ test('HTTP routes connect native review and Issue sessions without remote side e
   execFileSync('git', ['-C', dir, 'remote', 'add', 'origin', 'https://github.com/fixture/repo.git'], { stdio: 'ignore' })
   const originalFetch = globalThis.fetch
   let pausePr = null
-  const sha = 'a'.repeat(40), posts = [], prompts = [], sessions = new Map(), effects = [], routes = []
+  let reviewOutput = 'Review null handling.'
+  let issueResponseStatus = 0
+  const sha = 'a'.repeat(40), posts = [], issuesPosted = [], prompts = [], sessions = new Map(), effects = [], routes = []
+  const findingsPayload = {
+    summary: 'Two findings.',
+    findings: [
+      { severity: 'blocker', title: 'null deref', file: 'main.js', line: 1, evidence: 'x', detail: 'd', suggestion: 's', confidence: 'high' },
+      { severity: 'minor', title: 'naming', file: null, line: null, evidence: '', detail: 'd2', suggestion: 's2', confidence: 'low' },
+    ],
+  }
   const rawPr = { number: 12, title: 'Fix input', body: 'Details', state: 'open', head: { sha }, base: { sha: 'b'.repeat(40) }, html_url: 'https://github.com/fixture/repo/pull/12' }
   t.mock.method(globalThis, 'fetch', async (input, options = {}) => {
     const url = new URL(input)
@@ -58,6 +67,12 @@ test('HTTP routes connect native review and Issue sessions without remote side e
       const gate = pausePr; pausePr = null; gate.started(); await gate.wait
     }
     if (options.method === 'POST') {
+      if (url.pathname === '/repos/fixture/repo/issues') {
+        if (issueResponseStatus) return new Response(JSON.stringify({ message: 'rejected' }), { status: issueResponseStatus })
+        issuesPosted.push(JSON.parse(options.body))
+        const n = 700 + issuesPosted.length
+        return new Response(JSON.stringify({ number: n, html_url: `https://github.com/fixture/repo/issues/${n}` }))
+      }
       assert.ok(url.pathname.endsWith('/repos/fixture/repo/pulls/12/reviews'))
       posts.push(JSON.parse(options.body))
       return new Response(JSON.stringify({ id: 99 }))
@@ -89,7 +104,7 @@ test('HTTP routes connect native review and Issue sessions without remote side e
       async *stream(options) {
         assert.equal(sessions.get(options.sessionId).flushed, true)
         assert.equal(options.tools, undefined)
-        yield { type: 'text-delta', index: 0, text: 'Review null handling.' }
+        yield { type: 'text-delta', index: 0, text: reviewOutput }
         yield { type: 'finish', reason: { kind: 'stop' } }
       },
     },
@@ -127,6 +142,33 @@ test('HTTP routes connect native review and Issue sessions without remote side e
     assert.equal(second.reused, true)
     assert.equal(prompts.length, 1)
     assert.match(prompts[0].content[0].text, /Verify null/)
+    // Phase 2: structured findings become GitHub Issues through the same POST pipe.
+    reviewOutput = JSON.stringify(findingsPayload)
+    const structured = await post('review.create', target)
+    assert.equal(structured.draft.structured, true)
+    assert.equal(structured.draft.findings.length, 2)
+    const filed = await post('review.issues.create', { id: structured.draft.id, findingIds: ['f1', 'f2'], confirmed: true })
+    assert.equal(filed.stopped, null)
+    assert.deepEqual(filed.results.map(r => r.status), ['created', 'created'])
+    assert.equal(issuesPosted.length, 2)
+    assert.match(issuesPosted[0].body, /codehub-ai-review/)
+    assert.match(issuesPosted[0].title, /\[AI 检视\]/)
+    // Repeat is idempotent: no second POST for an already-created finding.
+    const again = await post('review.issues.create', { id: structured.draft.id, findingIds: ['f1'], confirmed: true })
+    assert.equal(again.results[0].status, 'created')
+    assert.equal(issuesPosted.length, 2, 'must not post a finding that already has an issue')
+    // A GitHub 4xx is provably uncreated: the finding is failed, not unknown.
+    issueResponseStatus = 403
+    const deniedDraft = await post('review.create', target)
+    const denied = await post('review.issues.create', { id: deniedDraft.draft.id, findingIds: ['f1'], confirmed: true })
+    assert.equal(denied.results[0].status, 'failed')
+    assert.match(denied.results[0].error, /403/)
+    // A 5xx is uncertain: the finding is unknown and never retried automatically.
+    issueResponseStatus = 500
+    const uncertainDraft = await post('review.create', target)
+    const uncertain = await post('review.issues.create', { id: uncertainDraft.draft.id, findingIds: ['f1'], confirmed: true })
+    assert.equal(uncertain.results[0].status, 'unknown')
+    issueResponseStatus = 0
     const another = await post('review.create', target)
     let release, started
     const began = new Promise(resolve => { started = resolve })
@@ -165,12 +207,24 @@ test('API validates writes, exposes Issues and does not block config saves on up
     const saved = await post('config.set', { provider: 'git', repos: [], organizations: [], ai: { provider: '', model: '' } })
     assert.equal(saved.status, 200)
     assert.equal(saved.body.refreshQueued, true)
+    // The AI output budget is normalized on write: blank means "workflow
+    // default", and hand-edited extremes cannot escape the clamp.
+    assert.equal(saved.body.config.ai.maxTokens, 16_384)
+    assert.equal((await post('config.set', { ai: { maxTokens: 999_999 } })).body.config.ai.maxTokens, 32_768)
+    assert.equal((await post('config.set', { ai: { maxTokens: 200 } })).body.config.ai.maxTokens, 1024)
+    assert.equal((await post('config.set', { ai: { maxTokens: '' } })).body.config.ai.maxTokens, 16_384)
     const issues = await (await fetch(base + 'issues')).json()
     assert.equal(issues.ok, true)
     assert.deepEqual(issues.issues, [])
     const boot = await (await fetch(base + 'boot')).json()
-    assert.deepEqual(boot.capabilities, { ai: false, develop: false })
+    assert.deepEqual(boot.capabilities, { ai: false, develop: false, issueWrite: true })
     assert.equal((await fetch(base + 'review.publish')).status, 405)
+    // review.issues.create is a write op: same method / origin / content-type guards.
+    assert.equal((await fetch(base + 'review.issues.create')).status, 405)
+    const crossOrigin = await post('review.issues.create', { id: 'x', findingIds: ['f1'], confirmed: true }, { origin: 'https://untrusted.example' })
+    assert.equal(crossOrigin.status, 403)
+    const wrongType = await fetch(base + 'review.issues.create', { method: 'POST', headers: { 'content-type': 'text/plain' }, body: 'not json' })
+    assert.equal(wrongType.status, 415)
     assert.equal((await fetch(base + 'mr&repoKey=github.com:a/b&number=-1')).status, 400)
     assert.equal((await fetch(base + 'issue&repoKey=github.com:other/repo&number=1')).status, 404)
     assert.equal((await post('issue.develop', { repoKey: 'github.com:a/b', number: 1 })).status, 403)
