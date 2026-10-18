@@ -18,7 +18,7 @@
 | 4 | 写 op 额外栅栏 | 非 POST → **405**；Origin 主机不匹配或 `sec-fetch-site: cross-site` → **403**；`content-type` 非 `application/json` → **415** |
 | 5 | 读 op 方法 | 非 GET → **405** |
 
-写 op：`config.set`、`config.test`、`review.create`、`review.publish`、`issue.develop`。
+写 op：`config.set`、`config.test`、`review.create`、`review.publish`、`review.issues.create`、`issue.develop`。
 
 `GET /codehub/index.html` 返回 SPA，并带：
 
@@ -44,14 +44,20 @@ POST body 上限 256 KB，超限立即拒绝并短路后续数据事件。
   "version": "0.1.5",
   "config": { /* 脱敏配置 */ },
   "configPath": "C:/Users/you/.dsh/codehub-dashboard/config.json",
-  "capabilities": { "ai": true, "develop": true },
+  "capabilities": { "ai": true, "develop": true, "issueWrite": true },
   "summary": { /* Summary 或 null */ },
   "hasData": true,
   "generatedAt": "2026-10-15T12:00:00.000Z"
 }
 ```
 
-`capabilities` 决定是否启用 AI 检视 / Issue 开发按钮（宿主可选服务缺失时为 `false`）。
+`capabilities` 决定是否启用 AI 检视 / Issue 开发 / 批量提 Issue 按钮（宿主可选服务缺失时为 `false`）：
+
+| 字段 | 含义 | 为 false 时 |
+|------|------|------------|
+| `ai` | `llm.stream` + `sessions.create/flush` 可用 | 禁用「生成 AI 检视」 |
+| `develop` | `sessionController` + 本地克隆校验可用 | 禁用 Issue 的「确认后在 DSH 中开发」与列表行「快速开始开发」 |
+| `issueWrite` | 已注入 `createIssue`（Issue 写路径可用） | 禁用问题清单的「创建 N 个 Issue」 |
 
 ---
 
@@ -254,13 +260,49 @@ Issue 详情（含分页拉取的评论）。**参数：** `repoKey`、`number`�
 ```json
 "draft": {
   "id": "uuid", "repoKey": "…", "number": 1234, "headSha": "40位sha",
-  "status": "draft", "body": "…草稿正文（截断时附范围受限声明）…",
+  "status": "draft", "body": "…可发布的草稿正文（截断时附范围受限声明）…",
   "createdAt": "…", "completedAt": "…", "sessionId": "session-uuid",
   "diffTruncated": false, "inputTruncated": false,
   "input": { /* 送入模型的快照，含 repo/mr/diff/files */ },
-  "output": { /* 流式聚合结果 */ }
+  "output": { /* 流式聚合结果 */ },
+
+  // 以下为结构化问题清单字段（v0.1.6 起）
+  "structured": true,                 // 本次模型输出是否成功解析为清单；解析失败为 false
+  "reviewSummary": "…模型摘要（≤4096 字符）…",
+  "findings": [ /* 0..12 条，见下 */ ],
+  "findingsTruncated": false,         // 模型返回超过 12 条，仅保留前 12
+  "parseWarnings": []                 // 最多 5 条，如「2 条无效或重复问题已忽略」
 }
 ```
+
+`structured === true` 时 `body` 由摘要 + 问题表格自动合成（用户仍可编辑后发布）；`structured === false` 时模型输出未按 JSON 契约返回，`body` 为原始文本（按 32 KB 边界裁剪），`findings` 为空数组——降级不整体失败，仍可发布。旧草稿可能完全缺失这些字段，消费方请用 `draft.findings ?? []`。
+
+`findings[]` 每条：
+
+```json
+{
+  "id": "f1", "severity": "blocker", "category": "bug",
+  "title": "空指针解引用", "file": "src/a.js", "line": 42,
+  "evidence": "+ return user.name", "detail": "…", "suggestion": "…",
+  "confidence": "high",
+  "fileVerified": true, "evidenceVerified": true,
+  "issueStatus": "idle", "issue": null, "issueError": null
+}
+```
+
+| 字段 | 取值 |
+|------|------|
+| `severity` | `blocker \| major \| minor \| nit`（模型的 `critical/p0→blocker`、`high/p1→major`、`low/p3/suggestion→nit`，未知归一为 `minor`） |
+| `category` | `bug \| security \| regression \| perf \| test \| maintainability \| other` |
+| `file` / `line` | 未给出时为 `null` |
+| `confidence` | `high \| medium \| low` |
+| `fileVerified` | `true` 命中变更列表 / `false` 列表完整但未命中 / `null` 列表被截断或未给出（无法核对） |
+| `evidenceVerified` | `true` diff 含该片段 / `false` diff 完整但未命中 / `null` diff 被截断或无证据 |
+| `issueStatus` | `idle \| creating \| created \| failed \| unknown` |
+
+文件/证据核验结果**只做展示与说明，不阻止提 Issue**——用户看到「证据未定位」仍有最终决定权。
+
+客户端超时注意：该 op 允许最长 120s 的模型时间，前端调用需放宽超时（本插件用 150s），否则会出现「前端先超时、服务端仍在生成」并诱发重复调用。同一 MR 并发调用会返回 **409**。
 
 状态取值：`generating | failed | draft | publishing | publish_unknown | published`。失败时 `failure: { message, finish? }`，响应 HTTP 状态取 `err.status`（服务缺失 503、PR 已关闭/标识变化 409）。
 
@@ -269,6 +311,61 @@ Issue 详情（含分页拉取的评论）。**参数：** `repoKey`、`number`�
 ## GET /codehub/api?op=review.get
 
 按 id 读取审计草稿。**参数：** `id`（UUID，否则 400）。**Response:** `{ ok, draft }`。
+
+---
+
+## GET /codehub/api?op=review.latest
+
+读取某 MR **最近一条** AI 草稿（按 `repoKey + number` 筛选、`createdAt` 取最新，含 `generating` 状态）。用于重新打开 MR 后恢复问题清单与 Issue 关联；纯只读，不触发模型。
+
+**参数：** `repoKey`、`number`。
+
+**Response:** `{ ok, draft }` —— 没有记录时 `draft` 为 **`null`（HTTP 200，不是 404）**，避免前端把「从未生成过」当错误处理。
+
+---
+
+## POST /codehub/api?op=review.issues.create
+
+把草稿里勾选的问题批量创建为 GitHub Issue（单独一次确认；与发布评审互相独立）。
+
+**Body:** `{ "id": "草稿UUID", "findingIds": ["f1","f3"], "confirmed": true }` —— 严格键集，多余字段 → **400**；`findingIds` 必须非空、去重、长度 1–10；缺 `confirmed:true` → **403**。
+
+**Response（HTTP 200，即使部分失败；逐条状态在 `results`）：**
+
+```json
+{
+  "ok": true,
+  "draft": { /* 更新后的草稿，含每条 finding 的 issueStatus / issue */ },
+  "stopped": null,
+  "results": [
+    { "findingId": "f1", "status": "created", "issue": { "number": 128, "url": "https://github.com/org/repo/issues/128", "createdAt": "…" } },
+    { "findingId": "f3", "status": "failed", "error": "forbidden" }
+  ]
+}
+```
+
+`stopped`：`null`（全部尝试完）/ `"timeout"`（超过 90s 批次预算）/ `"config"`（批次中配置变更）/ `"error"`（遇到失败或未知后停止）。未尝试的条目保持 `idle`，UI 保留其勾选以便下次提交。
+
+| 情形 | 响应 |
+|------|------|
+| 草稿不存在 | 404 |
+| 草稿无有效清单（`structured!==true` 或 `findings` 为空） | 409 |
+| 选中项含 `creating` / `unknown` | 409 `{ needsVerification: true, findingIds }` |
+| 同一草稿并发 | 409（`filing` 锁） |
+| 选中项全部为 `created` | 200 幂等返回，**不发任何请求** |
+
+**错误分类**（决定该条变 `failed` 还是 `unknown`）：
+
+| 错误 | 状态 | 理由 |
+|------|------|------|
+| GitHub 400/401/403/404/410/422/429 | `failed` | 服务器明确拒绝，Issue 未创建 |
+| 本地参数/标题/正文校验失败、仓库解析失败、配置竞态 | `failed` | 请求没有到达 GitHub |
+| gh CLI 非零退出但 stderr 含 `HTTP 4xx` | `failed` | 可证明被拒绝 |
+| 网络错误、超时、5xx、响应无法解析 | `unknown` | 请求可能已到达 GitHub |
+
+`failed` 可重试；`unknown` **永不自动重试**，须人工到 GitHub 核对（与 `publish_unknown` 哲学一致）。
+
+写入实现要点：端点固定为 `repos/{仓库}/issues`，**客户端无法传入** owner/repo/编号之外的任何目标、label 或 assignee；`githubRequest` 在该路径启用 `preserveStatus` 保留 GitHub 原始状态码，其它调用（含评审发布）行为不变。**不要求 MR 仍为 open**——Issue 是对已发生检视的记录。
 
 ---
 
