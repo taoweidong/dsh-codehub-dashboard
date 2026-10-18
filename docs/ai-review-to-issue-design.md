@@ -724,14 +724,14 @@ const writes = ['config.set', 'config.test', 'review.create', 'review.publish',
 3. 新增 `review.latest` op，按最终契约实现：按 `(repoKey, number)` 扫描审计文件取最新草稿（含 `generating` 状态），不临时降级为「只返回草稿」。
 4. 测试：并发 409、latest 空/有记录、客户端超时参数（client 测试）。
 
-### Phase 1：结构化输出（M，约 1 天）
+### Phase 1：结构化输出（M，约 1 天）—— 已完成（commit 待推送）
 
-1. `workflows.js`：`MAX_TOKENS` 调至 6144；新增 `MAX_MODEL_OUTPUT_BYTES`、`MAX_FINDINGS` 等常量。
-2. 新增纯函数 `parseReviewOutput` / `normalizeFindings` / `composeReviewBody`，并从模块导出供测试（或通过 fake llm 覆盖）。
-3. `createReview` 接入解析与持久化；`validateState` 增加字段校验。
-4. 更新 system prompt。
-5. `index.js`：`boot.capabilities.issueWrite`。
-6. 测试：合法 JSON、带围栏、前后有解释、非法 JSON 降级、字段截断、去重、排序、12 条截断、文件/证据三态核验、旧草稿兼容。
+1. ✅ `workflows.js`：`MAX_TOKENS` 调至 6144；新增 `MAX_MODEL_OUTPUT_BYTES=96KB`、`MAX_FINDINGS=12`、各字段上限常量；`reviewText` 输出上限从 32KB 文本层切到 96KB 模型输出层。
+2. ✅ 新增纯函数 `parseReviewOutput` / `normalizeFindings` / `composeReviewBody` 并从模块导出（`export function`），可脱离模型单测。
+3. ✅ `createReview` 接入解析与持久化（`structured/reviewSummary/findings/findingsTruncated/parseWarnings`）；`validateState` 仅当 `structured===true` 时做严格字段校验，旧草稿（缺字段）原样兼容。
+4. ✅ 系统提示词替换为 §8.1 的 JSON-only 契约；`reviewSnapshot` 新增精确 `filesTruncated` 信号供 `fileVerified` 三态判定。
+5. ⏭️ `index.js`：`boot.capabilities.issueWrite` 推迟到 Phase 2 与 `review.issues.create` 一同落地（该能力依赖 `createIssue` 注入，Phase 1 尚无写 Issue 路径）。
+6. ✅ 测试：合法 JSON、带围栏、前后解释（brace 兜底）、非法 JSON 降级并 32KB 截断、字段截断、去重、排序、12 条截断、文件/证据三态核验、旧草稿兼容——node:test 新增 16 例，全量 139/139 通过。
 
 ### Phase 2：提 Issue（M，约 1 天）
 

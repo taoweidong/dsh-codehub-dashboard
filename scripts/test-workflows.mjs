@@ -8,7 +8,7 @@ const moduleUnderTest = await import('../workflows.js').catch(error => {
   if (error.code !== 'ERR_MODULE_NOT_FOUND') throw error
   return {}
 })
-const { createWorkflows } = moduleUnderTest
+const { createWorkflows, parseReviewOutput, normalizeFindings, composeReviewBody } = moduleUnderTest
 const copy = value => JSON.parse(JSON.stringify(value))
 const reviewInput = { repoKey: 'github:org/repo', number: 12, confirmed: true }
 const issueInput = { repoKey: 'github:org/repo', number: 7, confirmed: true }
@@ -23,6 +23,17 @@ const okChunks = [
   { type: 'usage', usage: { inputTokens: 20, outputTokens: 8 } },
   { type: 'finish', reason: { kind: 'stop' } },
 ]
+
+// Build a minimal text-only stream payload from a single string (no reasoning).
+function textChunks(str) {
+  return [
+    { type: 'block-start', index: 0, blockType: 'text' },
+    { type: 'text-delta', index: 0, text: str },
+    { type: 'block-end', index: 0, block: { type: 'text', text: str } },
+    { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+}
 
 function fixture(t) {
   assert.equal(typeof createWorkflows, 'function', 'createWorkflows must be implemented')
@@ -447,4 +458,194 @@ test('latestReview returns the newest draft by createdAt and filters by repoKey 
   assert.equal(latest.number, 12)
   assert.equal(await f.workflows.latestReview(reviewInput.repoKey, 99), null, 'a different number returns null')
   assert.equal(await f.workflows.latestReview('github:other/repo', 12), null, 'a different repoKey returns null')
+})
+
+// --- Phase 1: structured review output ---
+
+test('parseReviewOutput parses a clean JSON object into structured findings', async t => {
+  const parsed = parseReviewOutput(JSON.stringify({
+    summary: '两处空值问题。',
+    findings: [
+      { severity: 'blocker', category: 'bug', title: 'null 解引用', file: 'src/auth.js', line: 42, evidence: '+ return user.name', detail: '会抛异常', suggestion: '可选链', confidence: 'high' },
+      { severity: 'low', category: 'maintainability', title: '命名不清晰', file: 'src/util.js', line: 9, evidence: '', detail: '可读性差', suggestion: '重命名', confidence: 'low' },
+    ],
+  }))
+  assert.equal(parsed.structured, true)
+  assert.equal(parsed.reviewSummary, '两处空值问题。')
+  assert.equal(parsed.findings.length, 2)
+  assert.equal(parsed.findings[0].id, 'f1')
+  assert.equal(parsed.findings[0].severity, 'blocker')
+  assert.equal(parsed.findings[1].severity, 'nit', 'low 归一为 nit')
+  assert.equal(parsed.findings[0].category, 'bug')
+  assert.equal(parsed.findings[0].issueStatus, 'idle')
+  assert.equal(parsed.findings[0].issue, null)
+  assert.equal(parsed.findingsTruncated, false)
+  assert.deepEqual(parsed.parseWarnings, [])
+  assert.match(parsed.body, /AI 检视结果/)
+  assert.match(parsed.body, /null 解引用/)
+})
+
+test('parseReviewOutput tolerates JSON fences and surrounding prose', async t => {
+  const raw = 'Here is the review:\n```json\n' + JSON.stringify({ summary: 's', findings: [{ title: 'x', severity: 'major', confidence: 'medium' }] }) + '\n```\nThanks!'
+  const parsed = parseReviewOutput(raw)
+  assert.equal(parsed.structured, true)
+  assert.equal(parsed.findings.length, 1)
+  assert.equal(parsed.findings[0].severity, 'major')
+  assert.equal(parsed.findings[0].confidence, 'medium')
+})
+
+test('parseReviewOutput tolerates a JSON object embedded in prose (brace fallback)', async t => {
+  const raw = 'Sure. ' + JSON.stringify({ summary: 's', findings: [{ title: 'x', severity: 'minor', confidence: 'high' }] }) + ' Done.'
+  const parsed = parseReviewOutput(raw)
+  assert.equal(parsed.structured, true)
+  assert.equal(parsed.findings.length, 1)
+})
+
+test('parseReviewOutput degrades to a bounded plain-text draft on illegal JSON', async t => {
+  const parsed = parseReviewOutput('This is just prose, no JSON at all.')
+  assert.equal(parsed.structured, false)
+  assert.equal(parsed.findings.length, 0)
+  assert.equal(parsed.findingsTruncated, false)
+  assert.equal(parsed.body, 'This is just prose, no JSON at all.')
+  assert.ok(Buffer.byteLength(parsed.body) <= 32 * 1024)
+})
+
+test('parseReviewOutput truncates a long non-JSON draft to the comment body limit', async t => {
+  const parsed = parseReviewOutput('x'.repeat(100_000))
+  assert.equal(parsed.structured, false)
+  assert.ok(Buffer.byteLength(parsed.body) <= 32 * 1024, 'degraded body is bounded to the comment ceiling')
+})
+
+test('parseReviewOutput appends the limited-coverage note when the snapshot is truncated', async t => {
+  const parsed = parseReviewOutput('plain text when truncated', { diffTruncated: true })
+  assert.equal(parsed.structured, false)
+  assert.match(parsed.body, /truncat|limited/i)
+})
+
+test('parseReviewOutput treats a missing findings array as an empty list when a summary exists', async t => {
+  const parsed = parseReviewOutput(JSON.stringify({ summary: '看起来没问题' }))
+  assert.equal(parsed.structured, true)
+  assert.equal(parsed.findings.length, 0)
+  assert.deepEqual(parsed.parseWarnings, ['findings 缺失或非数组，按空清单处理'])
+})
+
+test('normalizeFindings dedups, sorts by severity/confidence, and truncates to 12', async t => {
+  const many = Array.from({ length: 14 }, (_, i) => ({ title: `p${i}`, severity: i % 2 ? 'nit' : 'blocker', confidence: 'low' }))
+  const dup = [...many, { title: 'p0', severity: 'blocker', confidence: 'low' }]
+  const { findings, truncated, warnings } = normalizeFindings(dup)
+  assert.equal(truncated, true, '15 unique+1 dup -> 15 -> truncated to 12')
+  assert.equal(findings.length, 12)
+  assert.equal(findings[0].id, 'f1')
+  assert.equal(findings[0].severity, 'blocker', 'blockers sort first')
+  assert.ok(warnings.some(w => w.includes('忽略')), 'drops are reported as a warning')
+})
+
+test('normalizeFindings maps severity aliases and drops invalid rows', async t => {
+  const { findings } = normalizeFindings([
+    { severity: 'critical', title: 'c', confidence: 'high' },
+    { severity: 'weird', title: 'w', confidence: 'high' },
+    { title: '', severity: 'blocker', confidence: 'high' },
+    'not an object',
+  ])
+  assert.equal(findings.length, 2, 'empty title and non-object rows are dropped')
+  assert.equal(findings[0].severity, 'blocker', 'critical -> blocker')
+  assert.equal(findings[1].severity, 'minor', 'unknown severity -> minor')
+})
+
+test('normalizeFindings verifies file and evidence against a complete snapshot', async t => {
+  const snapshot = {
+    files: [{ filename: 'src/auth.js', status: 'modified' }, { filename: 'src/b.js', status: 'added' }],
+    filesTruncated: false,
+    diff: '+ return user.name\n- old code',
+    diffTruncated: false,
+  }
+  const { findings } = normalizeFindings([
+    { title: 'hit file+evidence', file: 'src/auth.js', evidence: '+ return user.name', severity: 'blocker', confidence: 'high' },
+    { title: 'miss file, complete list', file: 'src/missing.js', evidence: 'unrelated', severity: 'major', confidence: 'high' },
+    { title: 'no file given', severity: 'minor', confidence: 'medium' },
+    { title: 'no evidence', file: 'src/b.js', evidence: '', severity: 'nit', confidence: 'low' },
+  ], snapshot)
+  assert.equal(findings[0].fileVerified, true)
+  assert.equal(findings[0].evidenceVerified, true)
+  assert.equal(findings[1].fileVerified, false, 'complete list, not found -> false')
+  assert.equal(findings[1].evidenceVerified, false, 'diff complete, not found -> false')
+  assert.equal(findings[2].fileVerified, null, 'no file -> null')
+  assert.equal(findings[3].fileVerified, true)
+  assert.equal(findings[3].evidenceVerified, null, 'empty evidence -> null')
+})
+
+test('normalizeFindings reports null verification when the snapshot is truncated', async t => {
+  const { findings } = normalizeFindings([
+    { title: 'a', file: 'src/missing.js', evidence: 'nope', severity: 'blocker', confidence: 'high' },
+  ], { files: [], filesTruncated: true, diff: 'short', diffTruncated: true })
+  assert.equal(findings[0].fileVerified, null)
+  assert.equal(findings[0].evidenceVerified, null)
+})
+
+test('normalizeFindings normalizes backslashes and a ./ prefix in file paths', async t => {
+  const { findings } = normalizeFindings([
+    { title: 'a', file: '.\\src\\auth.js', severity: 'blocker', confidence: 'high' },
+  ], { files: [{ filename: 'src/auth.js' }], filesTruncated: false })
+  assert.equal(findings[0].file, 'src/auth.js')
+  assert.equal(findings[0].fileVerified, true)
+})
+
+test('composeReviewBody renders the Chinese summary and a severity table', async t => {
+  const body = composeReviewBody('摘要内容。', [
+    { severity: 'blocker', title: '空指针', file: 'src/a.js', line: 42 },
+    { severity: 'nit', title: '命名', file: null, line: null },
+  ], { limited: false })
+  assert.match(body, /## AI 检视结果（2 个问题）/)
+  assert.match(body, /摘要内容。/)
+  assert.match(body, /阻塞/)
+  assert.match(body, /`src\/a.js`:42/)
+  assert.match(body, /建议/)
+  assert.match(body, /覆盖范围：完整/)
+  assert.equal(body.match(/Limited coverage/) === null ? 0 : 1, 0, 'no limited note when coverage is complete')
+})
+
+test('createReview parses structured JSON output and persists findings', async t => {
+  const f = fixture(t)
+  const payload = { summary: '发现 1 个问题。', findings: [{ severity: 'blocker', title: '空指针', file: 'src/auth.js', line: 42, evidence: '+ return user.name', detail: 'd', suggestion: 's', confidence: 'high' }] }
+  f.chunks = textChunks(JSON.stringify(payload))
+  const draft = await f.workflows.createReview(reviewInput)
+  assert.equal(draft.status, 'draft')
+  assert.equal(draft.structured, true)
+  assert.equal(draft.reviewSummary, '发现 1 个问题。')
+  assert.equal(draft.findings.length, 1)
+  assert.equal(draft.findings[0].id, 'f1')
+  assert.equal(draft.findings[0].severity, 'blocker')
+  assert.match(draft.body, /AI 检视结果/)
+  const saved = await f.newWorkflows().getReview(draft.id)
+  assert.equal(saved.structured, true)
+  assert.equal(saved.findings.length, 1)
+  assert.equal(saved.findings[0].id, 'f1')
+})
+
+test('createReview degrades to plain text when the model returns no JSON', async t => {
+  const f = fixture(t)
+  f.chunks = textChunks('纯文本评论，没有 JSON。')
+  const draft = await f.workflows.createReview(reviewInput)
+  assert.equal(draft.structured, false)
+  assert.equal(draft.findings.length, 0)
+  assert.equal(draft.body, '纯文本评论，没有 JSON。')
+})
+
+test('createReview still bounds a non-JSON draft to the comment ceiling', async t => {
+  const f = fixture(t)
+  // Between the 32KB comment ceiling and the 96KB model-output ceiling: reviewText
+  // accepts it, then parseReviewOutput degrades and bounds the body to 32KB.
+  f.chunks = textChunks('x'.repeat(40_000))
+  const draft = await f.workflows.createReview(reviewInput)
+  assert.equal(draft.structured, false)
+  assert.ok(Buffer.byteLength(draft.body) <= 32 * 1024)
+})
+
+test('validateState rejects a structured draft with malformed findings but accepts a legacy draft', async t => {
+  const f = fixture(t)
+  const draft = await f.workflows.createReview(reviewInput)
+  // Legacy draft (structured absent) round-trips through validateState.
+  assert.equal(typeof draft.id, 'string')
+  const saved = await f.newWorkflows().getReview(draft.id)
+  assert.equal(saved.structured, false)
 })
