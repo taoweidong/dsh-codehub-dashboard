@@ -489,7 +489,7 @@ async function ghSnapshot(repo, cfg) {
 
 function apiError(message, status = 400) { return Object.assign(new Error(message), { status }) }
 
-async function githubRequest(repo, cfg, endpoint, { paginate = false, method = 'GET', body, text = false } = {}) {
+async function githubRequest(repo, cfg, endpoint, { paginate = false, method = 'GET', body, text = false, preserveStatus = false } = {}) {
   if (!isSafeRepoPath(repo.path)) throw apiError('仓库路径不合法')
   const inst = instanceOf(cfg, repo.instanceId)
   const env = ghEnv(cfg, repo.instanceId)
@@ -504,7 +504,13 @@ async function githubRequest(repo, cfg, endpoint, { paginate = false, method = '
     if (result.code === 0) return text ? result.stdout : paginate ? parseGhPages(result.stdout) : JSON.parse(result.stdout)
     cliError = clip(result.stderr || 'gh api 失败', 400)
     // A failed write may already have reached GitHub. Never retry it via another transport.
-    if (method !== 'GET' || !inst?.token) throw apiError(cliError, 502)
+    if (method !== 'GET' || !inst?.token) {
+      if (preserveStatus) {
+        const match = cliError.match(/HTTP\s+(\d{3})/i)
+        throw apiError(cliError, match ? Number(match[1]) : 502)
+      }
+      throw apiError(cliError, 502)
+    }
   }
   if (!inst?.token) throw apiError(cliError || 'HTTP 模式需要实例 token', 503)
   const base = apiBaseFor(env.GH_HOST)
@@ -517,7 +523,10 @@ async function githubRequest(repo, cfg, endpoint, { paginate = false, method = '
       headers: { accept: text ? 'application/vnd.github.diff' : 'application/vnd.github+json', authorization: `Bearer ${inst.token}`, 'content-type': 'application/json', 'user-agent': `dsh-codehub-dashboard/${PLUGIN_VERSION}` },
       body: body === undefined ? undefined : JSON.stringify(body),
     })
-    if (!response.ok) throw apiError(`GitHub HTTP ${response.status}`, response.status === 404 ? 404 : 502)
+    if (!response.ok) {
+      if (preserveStatus) throw apiError(`GitHub HTTP ${response.status}`, response.status)
+      throw apiError(`GitHub HTTP ${response.status}`, response.status === 404 ? 404 : 502)
+    }
     if (text) return response.text()
     const value = await response.json()
     if (!paginate) return value
@@ -1109,6 +1118,24 @@ export function apply(ctx, loaderConfig = {}) {
       if (store.rev !== revision) throw apiError('发布前配置已变更，请重新核对目标仓库', 409)
       return githubRequest(repo, config, `repos/${repo.path}/pulls/${number}/reviews`, { method: 'POST', body: { commit_id: headSha, event: 'COMMENT', body } })
     },
+    createIssue: async ({ repoKey, number, title, body }) => {
+      if (typeof title !== 'string' || !title.trim()) throw Object.assign(apiError('Issue 标题缺失', 400), { knownNotCreated: true })
+      if (typeof body !== 'string' || !body.trim()) throw Object.assign(apiError('Issue 正文缺失', 400), { knownNotCreated: true })
+      const revision = store.rev
+      const repo = await resolveRepo(repoKey, number)
+      if (store.rev !== revision) throw Object.assign(apiError('创建前配置已变更，请重新核对仓库', 409), { knownNotCreated: true })
+      try {
+        // Fixed endpoint and issue shape: clients cannot steer the target repo,
+        // PR number, label, or assignee. preserveStatus keeps GitHub's 4xx so the
+        // workflow can mark the finding failed (provably uncreated) instead of unknown.
+        const issue = await githubRequest(repo, store.get(), `repos/${repo.path}/issues`, { method: 'POST', body: { title, body }, preserveStatus: true })
+        if (!issue || typeof issue.number !== 'number' || typeof issue.html_url !== 'string') throw apiError('GitHub 返回的 Issue 格式不正确', 502)
+        return { number: issue.number, url: issue.html_url }
+      } catch (error) {
+        if (error?.status && [400, 401, 403, 404, 410, 422, 429].includes(error.status)) error.knownNotCreated = true
+        throw error
+      }
+    },
   })
   let reviewLoad = null
   let saveRefresh = null
@@ -1165,7 +1192,7 @@ export function apply(ctx, loaderConfig = {}) {
           if (pathname !== '/codehub/api') { sendJson({ ok: false, error: 'not-found' }, 404); return }
 
           const op = q.get('op') || 'boot'; const cfg = store.get()
-          const writes = ['config.set', 'config.test', 'review.create', 'review.publish', 'issue.develop']
+          const writes = ['config.set', 'config.test', 'review.create', 'review.publish', 'review.issues.create', 'issue.develop']
           if (writes.includes(op)) {
             if (req.method !== 'POST') { sendJson({ ok: false, error: 'POST required' }, 405); return }
             const origin = req.headers.origin
@@ -1220,6 +1247,7 @@ export function apply(ctx, loaderConfig = {}) {
           if (op === 'review.get') { sendJson({ ok: true, draft: await workflows.getReview(q.get('id')) }); return }
           if (op === 'review.latest') { sendJson({ ok: true, draft: await workflows.latestReview(q.get('repoKey'), Number(q.get('number'))) }); return }
           if (op === 'review.publish') { sendJson({ ok: true, ...await workflows.publish(await payload()) }); return }
+          if (op === 'review.issues.create') { sendJson({ ok: true, ...await workflows.fileIssues(await payload()) }); return }
           if (op === 'issue.develop') { sendJson({ ok: true, ...await workflows.develop(await payload()) }); return }
           if (op === 'reviews') {
             const loaded = await reviewSnapshots(); const snaps = loaded.snapshots; const meLogin = (cfg.me?.login || '').trim(); let comments = []

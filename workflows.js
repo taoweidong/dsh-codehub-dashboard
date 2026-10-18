@@ -16,6 +16,8 @@ const MAX_FINDING_EVIDENCE = 600
 const MAX_FINDING_DETAIL = 1200
 const MAX_FINDING_SUGGESTION = 800
 const MAX_FINDING_WARNINGS = 5
+const MAX_FINDINGS_PER_BATCH = 10
+const MAX_BATCH_MS = 90_000
 const REVIEW_TIMEOUT_MS = 120000
 const PROMPT_TIMEOUT_MS = 60000
 const SEVERITIES = ['blocker', 'major', 'minor', 'nit']
@@ -33,6 +35,7 @@ const PROTECTED_STATUSES = new Set(['generating', 'publishing', 'publish_unknown
 // The host has one session controller. Share the admission guard across plugin instances.
 const developing = new Set()
 const generating = new Set()
+const filing = new Set()
 const clone = value => JSON.parse(JSON.stringify(value))
 const now = () => new Date().toISOString()
 const hasMethod = (value, name) => typeof value?.[name] === 'function'
@@ -316,6 +319,65 @@ export function composeReviewBody(summary, findings, options = {}) {
   return limited ? body + LIMITED_COVERAGE : body
 }
 
+// --- Issue composition (Phase 2) ---
+// An AI finding becomes a GitHub Issue whose body carries the MR provenance and a
+// stable audit marker. @-mentions in model text are neutralized with a zero-width
+// space so the model cannot trigger unrelated notifications; the marker is appended
+// after sanitization so it cannot be forged or broken by model content.
+
+function sanitizeAt(text) {
+  return typeof text === 'string' ? text.replace(/@/g, '@\u200b') : ''
+}
+
+function issueLink(url, number) {
+  return typeof url === 'string' && /^https?:\/\//i.test(url) ? url : `#${number}`
+}
+
+export function composeIssueTitle(finding) {
+  const sev = SEVERITY_LABEL[finding.severity] ?? finding.severity
+  return `[AI 检视][${sev}] ${sanitizeAt(finding.title)}`
+}
+
+export function composeIssueBody(draft, finding) {
+  const mr = draft.input?.mr ?? {}
+  const mrUrl = issueLink(mr.url, draft.number)
+  const loc = finding.file ? `${finding.file}${finding.line ? ':' + finding.line : ''}` : '(未指定位置)'
+  const evidence = finding.evidence ? `    ${finding.evidence.replace(/\n/g, '\n    ')}` : '(无证据)'
+  const fileHint = finding.fileVerified === true ? '已命中变更列表' : finding.fileVerified === false ? '未命中变更列表' : '变更列表截断无法核对'
+  const evHint = finding.evidenceVerified === true ? '已核对' : finding.evidenceVerified === false ? '未在 diff 中定位' : '上下文截断无法核对'
+  return [
+    '## 来源',
+    '',
+    `- MR: ${mrUrl}`,
+    `- 仓库: \`${draft.repoKey}\``,
+    `- 检视提交: \`${draft.headSha}\``,
+    `- MR 状态: ${typeof mr.state === 'string' ? mr.state.toLowerCase() : ''}`,
+    `- AI 草稿: \`${draft.id}\` / 问题 \`${finding.id}\``,
+    '',
+    '## 问题',
+    '',
+    sanitizeAt(finding.detail || '(无说明)'),
+    '',
+    '## 位置',
+    '',
+    `\`${loc}\``,
+    '',
+    '## 证据（模型引用）',
+    '',
+    evidence,
+    '',
+    '## 建议',
+    '',
+    sanitizeAt(finding.suggestion || '(无建议)'),
+    '',
+    '## 核实提示',
+    '',
+    `本条由 AI 生成，可能不准确。证据定位：${evHint}。文件定位：${fileHint}。`,
+    '',
+    `<!-- codehub-ai-review:${draft.id}:${finding.id} -->`,
+  ].join('\n')
+}
+
 function validateStructuredDraft(draft) {
   if (!Array.isArray(draft.findings) || draft.findings.length > MAX_FINDINGS) throw new Error('Invalid persisted draft')
   const ids = new Set()
@@ -478,7 +540,7 @@ async function reviewText(llm, options) {
   return { body, finish, ...(usage === undefined ? {} : { usage }) }
 }
 
-export function createWorkflows({ ctx, store, filePath, getPullRequest, getIssue, verifyLocalRepo, publishReview }) {
+export function createWorkflows({ ctx, store, filePath, getPullRequest, getIssue, verifyLocalRepo, publishReview, createIssue }) {
   const disk = persistence(filePath)
   // Soft-dependency probe. The cordis contract only supports a flat required
   // `inject` array: accessing an un-injected service via property (ctx.llm)
@@ -493,7 +555,7 @@ export function createWorkflows({ ctx, store, filePath, getPullRequest, getIssue
   const developAvailable = () => hasMethod(service('sessionController'), 'create') && hasMethod(service('sessionController'), 'prompt') && typeof verifyLocalRepo === 'function'
 
   function capabilities() {
-    return { ai: aiAvailable(), develop: developAvailable() }
+    return { ai: aiAvailable(), develop: developAvailable(), issueWrite: typeof createIssue === 'function' }
   }
 
   async function models() {
@@ -709,5 +771,73 @@ export function createWorkflows({ ctx, store, filePath, getPullRequest, getIssue
     }
   }
 
-  return { capabilities, models, createReview, getReview, latestReview, publish, develop }
+  function validateFindingIds(value) {
+    if (!Array.isArray(value) || value.length < 1 || value.length > MAX_FINDINGS_PER_BATCH) throw fail(400, `findingIds must be a non-empty array of 1..${MAX_FINDINGS_PER_BATCH} ids`)
+    const seen = new Set()
+    for (const id of value) {
+      if (typeof id !== 'string' || !/^f\d+$/.test(id)) throw fail(400, 'Invalid finding id')
+      if (seen.has(id)) throw fail(400, 'findingIds must not contain duplicates')
+      seen.add(id)
+    }
+    return value
+  }
+
+  async function fileIssues(input) {
+    confirmed(input, ['id', 'findingIds', 'confirmed'])
+    const id = draftId(input.id)
+    const findingIds = validateFindingIds(input.findingIds)
+    requireService(typeof createIssue === 'function', 'issue creation')
+    if (filing.has(id)) throw fail(409, 'Issue filing is already in progress for this draft')
+    filing.add(id)
+    try {
+      const revision = store?.rev
+      const state = disk.read()
+      const draft = state.drafts.find(d => d.id === id)
+      if (!draft) throw fail(404, 'Review draft not found')
+      if (draft.structured !== true || !Array.isArray(draft.findings) || draft.findings.length === 0) throw fail(409, 'This draft has no structured findings to file')
+      const byId = new Map(draft.findings.map(f => [f.id, f]))
+      for (const fid of findingIds) if (!byId.has(fid)) throw fail(400, `Finding ${fid} not found in this draft`)
+      const blocked = findingIds.filter(fid => ['creating', 'unknown'].includes(byId.get(fid).issueStatus))
+      if (blocked.length) throw fail(409, 'Some selected findings are mid-flight or have an unknown outcome; verify before retrying', { needsVerification: true, findingIds: blocked })
+      const results = []
+      const queue = []
+      for (const fid of findingIds) {
+        const f = byId.get(fid)
+        if (f.issueStatus === 'created') results.push({ findingId: fid, status: 'created', issue: { number: f.issue.number, url: f.issue.url, createdAt: f.issue.createdAt } })
+        else queue.push(fid)
+      }
+      if (queue.length === 0) return { ok: true, draft: clone(draft), stopped: null, results }
+      const started = Date.now()
+      let stopped = null
+      for (const fid of queue) {
+        if (stopped) { results.push({ findingId: fid, status: byId.get(fid).issueStatus, error: `skipped: ${stopped}` }); continue }
+        if (Date.now() - started > MAX_BATCH_MS) { stopped = 'timeout'; results.push({ findingId: fid, status: byId.get(fid).issueStatus, error: 'skipped: timeout' }); continue }
+        if (store?.rev !== revision) { stopped = 'config'; results.push({ findingId: fid, status: byId.get(fid).issueStatus, error: 'skipped: config changed' }); continue }
+        const finding = byId.get(fid)
+        disk.update(s => { const f = s.drafts.find(d => d.id === id).findings.find(x => x.id === fid); f.issueStatus = 'creating'; f.issueError = null })
+        try {
+          const issue = await createIssue({ repoKey: draft.repoKey, number: draft.number, title: composeIssueTitle(finding), body: composeIssueBody(draft, finding) })
+          const created = { number: issue.number, url: issue.url, createdAt: now() }
+          disk.update(s => { const f = s.drafts.find(d => d.id === id).findings.find(x => x.id === fid); f.issueStatus = 'created'; f.issue = created; f.issueError = null })
+          finding.issueStatus = 'created'; finding.issue = created; finding.issueError = null
+          results.push({ findingId: fid, status: 'created', issue: created })
+        } catch (error) {
+          const known = error.knownNotCreated === true
+          const status = known ? 'failed' : 'unknown'
+          const message = String(error.message ?? 'Issue creation failed').slice(0, 500)
+          disk.update(s => { const f = s.drafts.find(d => d.id === id).findings.find(x => x.id === fid); f.issueStatus = status; f.issueError = message })
+          finding.issueStatus = status; finding.issueError = message
+          results.push({ findingId: fid, status, error: message })
+          stopped = 'error'
+          break
+        }
+      }
+      const final = disk.read().drafts.find(d => d.id === id)
+      return { ok: true, draft: clone(final), stopped, results }
+    } finally {
+      filing.delete(id)
+    }
+  }
+
+  return { capabilities, models, createReview, getReview, latestReview, publish, develop, fileIssues }
 }
