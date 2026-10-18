@@ -311,14 +311,14 @@ function relTime(iso){ if(!iso) return "—"; const t=new Date(iso).getTime(); i
 const absTime = (iso) => iso ? new Date(iso).toLocaleString("zh-CN",{hour12:false}) : "";
 const fmtNum = (n) => Number(n||0).toLocaleString("zh-CN");
 
-function timeoutSignal(){ try{ return typeof AbortSignal!=="undefined"&&AbortSignal.timeout?AbortSignal.timeout(20000):undefined; }catch{ return undefined; } }
+function timeoutSignal(ms){ try{ return typeof AbortSignal!=="undefined"&&AbortSignal.timeout?AbortSignal.timeout(ms||20000):undefined; }catch{ return undefined; } }
 function timeoutError(e){ return e&&(e.name==="TimeoutError"||e.name==="AbortError")?new Error("请求超时（20 秒），请检查网络后重试"):e; }
 async function api(op, params){ const u=new URL("/codehub/api", location.origin); u.searchParams.set("op",op);
   for(const [k,v] of Object.entries(params||{})) if(v!==undefined&&v!==null&&v!=="") u.searchParams.set(k,String(v));
   let r; try{ r=await fetch(u,{headers:{accept:"application/json"},signal:timeoutSignal()}); }catch(e){ throw timeoutError(e); }
   const j=await r.json().catch(()=>({ok:false,error:"bad response"}));
   if(!r.ok||!j.ok) throw new Error(j.error||("HTTP "+r.status)); return j; }
-async function apiPost(op, body){ let r; try{ r=await fetch("/codehub/api?op="+encodeURIComponent(op),{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body||{}),signal:timeoutSignal()}); }catch(e){ throw timeoutError(e); }
+async function apiPost(op, body, opts){ let r; try{ r=await fetch("/codehub/api?op="+encodeURIComponent(op),{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body||{}),signal:timeoutSignal(opts&&opts.timeoutMs)}); }catch(e){ throw timeoutError(e); }
   const j=await r.json().catch(()=>({ok:false,error:"bad response"})); if(!r.ok||!j.ok) throw new Error(j.error||("HTTP "+r.status)); return j; }
 
 function toast(msg, ms){ const t=$("#toast"); t.textContent=msg; t.classList.add("show"); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"), ms||2600); }
@@ -828,7 +828,7 @@ async function createReview(){const d=detail;if(!d||d.kind!=="mr"||!d.mr)return;
   if(w.pending||w.draft?.status==="published"||draftNeedsVerify(w.draft)||state.boot?.capabilities?.ai!==true)return;
   if(!confirm("将此 MR 的 diff 发送给已配置的 DSH 模型以生成评审草稿。Diff 可能不完整；不会自动发布。"+(w.draft?"继续会替换当前草稿正文。":"")+"是否继续？"))return;
   w.pending="create";w.error="";w.preview=null;renderReviewWorkspace(d);
-  try{const j=await apiPost("review.create",{repoKey:d.repoKey,number:d.number,confirmed:true});w.draft=j.draft;w.body=j.draft.body||"";}
+  try{const j=await apiPost("review.create",{repoKey:d.repoKey,number:d.number,confirmed:true},{timeoutMs:150000});w.draft=j.draft;w.body=j.draft.body||"";}
   catch(e){w.error=e.message;}finally{w.pending="";renderReviewWorkspace(d);}
 }
 function previewReview(){const d=detail;if(!d||d.kind!=="mr")return;const w=workFor(d);if(w.pending||!w.draft||w.draft.status==="published"||draftNeedsVerify(w.draft))return;

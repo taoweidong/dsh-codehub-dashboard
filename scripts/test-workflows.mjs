@@ -414,3 +414,37 @@ test('bounded retention preserves every unresolved publish state', async t => {
   assert.ok(state.drafts.length <= 100)
   assert.equal((await f.newWorkflows().getReview(uncertain.id)).status, 'publish_unknown')
 })
+
+test('concurrent review.create for the same MR returns 409 while one is in progress', async t => {
+  const f = fixture(t)
+  const gate = deferred()
+  f.ctx.llm.stream = async function* () {
+    await gate.promise
+    for (const chunk of f.chunks) yield copy(chunk)
+  }
+  const first = f.workflows.createReview(reviewInput)
+  const second = f.workflows.createReview(reviewInput)
+  await rejectsStatus(() => second, 409)
+  gate.resolve()
+  const draft = await first
+  assert.equal(draft.status, 'draft')
+  const third = await f.workflows.createReview(reviewInput)
+  assert.equal(third.status, 'draft')
+})
+
+test('latestReview returns null when the MR has no draft', async t => {
+  const f = fixture(t)
+  assert.equal(await f.workflows.latestReview(reviewInput.repoKey, reviewInput.number), null)
+})
+
+test('latestReview returns the newest draft by createdAt and filters by repoKey + number', async t => {
+  const f = fixture(t)
+  await f.workflows.createReview(reviewInput)
+  await new Promise(r => setTimeout(r, 10))
+  const second = await f.workflows.createReview(reviewInput)
+  const latest = await f.workflows.latestReview(reviewInput.repoKey, reviewInput.number)
+  assert.equal(latest.id, second.id, 'latest is the newer draft')
+  assert.equal(latest.number, 12)
+  assert.equal(await f.workflows.latestReview(reviewInput.repoKey, 99), null, 'a different number returns null')
+  assert.equal(await f.workflows.latestReview('github:other/repo', 12), null, 'a different repoKey returns null')
+})

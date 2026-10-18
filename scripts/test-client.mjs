@@ -132,6 +132,7 @@ function spa() {
     document: { querySelector: node, getElementById: id => node('#'+id), querySelectorAll: () => [], addEventListener: (name, fn) => documentEvents.set(name, fn), visibilityState: 'visible', activeElement: null },
     fetch: () => new Promise(() => {}), setTimeout: () => 1, clearTimeout() {}, setInterval: fn => { intervals.push(fn); return 1; }, clearInterval() {},
     crypto: { randomUUID: () => 'request-uuid' }, confirm: () => true,
+    AbortSignal: { timeout: (ms) => ({ ms }) },
   });
   vm.runInContext(script, sandbox);
   const run = code => vm.runInContext(code, sandbox);
@@ -568,6 +569,16 @@ test('api converts an aborted/timed-out request into an explicit timeout error',
   const s = spa();
   s.sandbox.fetch = () => Promise.reject(Object.assign(new Error('aborted'), { name: 'TimeoutError' }));
   await assert.rejects(s.run(`api('overview')`), /请求超时（20 秒）/);
+});
+
+test('apiPost honors a per-call timeoutMs override and keeps the 20s default', () => {
+  const s = spa();
+  const seen = [];
+  s.sandbox.fetch = (u, opts) => { seen.push(opts.signal && opts.signal.ms); return Promise.reject(Object.assign(new Error('aborted'), { name: 'TimeoutError' })); };
+  s.run('apiPost("overview", {})').catch(() => {});
+  assert.equal(seen[0], 20000, 'default apiPost uses the 20s signal');
+  s.run('apiPost("review.create", { confirmed: true }, { timeoutMs: 150000 })').catch(() => {});
+  assert.equal(seen[1], 150000, 'review.create passes the 150s signal override');
 });
 
 test('MR diff truncation is disclosed in the detail notice', async () => {

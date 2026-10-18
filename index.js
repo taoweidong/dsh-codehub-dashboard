@@ -1218,6 +1218,7 @@ export function apply(ctx, loaderConfig = {}) {
           if (op === 'models') { sendJson({ ok: true, ...await workflows.models() }); return }
           if (op === 'review.create') { sendJson({ ok: true, draft: await workflows.createReview(await payload()) }); return }
           if (op === 'review.get') { sendJson({ ok: true, draft: await workflows.getReview(q.get('id')) }); return }
+          if (op === 'review.latest') { sendJson({ ok: true, draft: await workflows.latestReview(q.get('repoKey'), Number(q.get('number'))) }); return }
           if (op === 'review.publish') { sendJson({ ok: true, ...await workflows.publish(await payload()) }); return }
           if (op === 'issue.develop') { sendJson({ ok: true, ...await workflows.develop(await payload()) }); return }
           if (op === 'reviews') {

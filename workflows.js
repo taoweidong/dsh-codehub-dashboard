@@ -17,6 +17,7 @@ const DRAFT_STATUSES = new Set(['generating', 'failed', 'draft', 'publishing', '
 const PROTECTED_STATUSES = new Set(['generating', 'publishing', 'publish_unknown'])
 // The host has one session controller. Share the admission guard across plugin instances.
 const developing = new Set()
+const generating = new Set()
 const clone = value => JSON.parse(JSON.stringify(value))
 const now = () => new Date().toISOString()
 const hasMethod = (value, name) => typeof value?.[name] === 'function'
@@ -320,6 +321,14 @@ export function createWorkflows({ ctx, store, filePath, getPullRequest, getIssue
     return clone(findDraft(disk.read(), draftId(id)))
   }
 
+  function latestReview(repoKey, number) {
+    target({ repoKey, number })
+    const draft = disk.read().drafts
+      .filter(d => d.repoKey === repoKey && d.number === number)
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0]
+    return clone(draft ?? null)
+  }
+
   async function createReview(input) {
     confirmed(input, ['repoKey', 'number', 'confirmed'])
     const { repoKey, number } = target(input)
@@ -333,6 +342,9 @@ export function createWorkflows({ ctx, store, filePath, getPullRequest, getIssue
     }
     const config = { provider: selection.provider, model: selection.model, maxTokens: MAX_TOKENS }
     disk.read() // Do not invoke the provider if prior audit state cannot be recovered.
+    const genKey = JSON.stringify([resolve(filePath), repoKey, number])
+    if (generating.has(genKey)) throw fail(409, 'Review generation is already in progress for this pull request')
+    generating.add(genKey)
     let id
     try {
       const data = await getPullRequest(repoKey, number, { diff: true })
@@ -384,6 +396,8 @@ export function createWorkflows({ ctx, store, filePath, getPullRequest, getIssue
         } catch {} // A prior generating record must survive an audit-write failure.
       }
       throw Object.assign(serviceError(error, 'Native review generation failed'), id ? { draftId: id } : {})
+    } finally {
+      generating.delete(genKey)
     }
   }
 
@@ -498,5 +512,5 @@ export function createWorkflows({ ctx, store, filePath, getPullRequest, getIssue
     }
   }
 
-  return { capabilities, models, createReview, getReview, publish, develop }
+  return { capabilities, models, createReview, getReview, latestReview, publish, develop }
 }
